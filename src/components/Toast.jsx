@@ -53,7 +53,7 @@ export function ToastProvider({ children }) {
                 }}
               >
                 <Icon size={14} style={{ color: c.icon, flexShrink: 0 }} />
-                <span className="flex-1 text-char leading-snug text-xs" style={{ letterSpacing: '.2px' }}>{message}</span>
+                <span className="flex-1 text-char leading-snug text-xs" style={{ letterSpacing: '.2px' }}>{t.message}</span>
                 <button onClick={() => remove(t.id)} className="text-stone hover:text-char transition-colors">
                   <X size={13} />
                 </button>

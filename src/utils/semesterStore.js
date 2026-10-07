@@ -7,11 +7,14 @@
 //                     sgpa_calc_v2_<sem>_major_<majorId>  that major's specialization course(s)
 import { enrichCourse } from './calculations.js'
 import { LS_KEY_PREFIX, LS_SELECTION, MAJORS, SEMESTERS } from './constants.js'
-import { loadMinors } from './localStorage.js'
+import { loadMajor, loadMinors } from './localStorage.js'
 import {
   courseTemplate, isMajorSemester, isMajorId, splitMajorCourses, mergeMajorCourses,
-  syncMinorCourses, inferMinors, hasMarks,
+  syncMinorCourses, inferMinors, majorIdForCode, mergeByCode, dedupeByCode,
 } from './semesterTemplates.js'
+
+// Set once the first-layout migration has run (value: ISO time of the first run).
+export const LS_MAJOR_SEM_MIGRATED = 'sgpa_major_sem_layout_v2'
 
 export function courseKey(semester, divide) {
   return `${LS_KEY_PREFIX}_${semester}_${divide}`
@@ -67,10 +70,14 @@ export function loadSemesterCourses(semester, divide, minorIds = []) {
   if (!isMajorSemester(semester)) {
     return loadCoursesForDivide(semester, divide) ?? makeCoursesFromTemplate(courseTemplate(semester, divide))
   }
-  const tpl    = splitMajorCourses(courseTemplate(semester, divide, minorIds), semester, divide)
-  const shared = readCourseList(sharedKey(semester)) ?? makeCoursesFromTemplate(tpl.shared)
-  const major  = readCourseList(majorKey(semester, divide)) ?? makeCoursesFromTemplate(tpl.major)
-  return syncMinorCourses(mergeMajorCourses(shared, major), semester, minorIds, blankCourse)
+  const tpl = splitMajorCourses(courseTemplate(semester, divide, minorIds), semester)
+  // Only shared codes come from the shared list and only this major's code from its key.
+  const own = (list, owner) => list?.filter(c => majorIdForCode(semester, c.courseCode) === owner) ?? null
+  const sharedStored = own(readCourseList(sharedKey(semester)), null)
+  const majorStored  = own(readCourseList(majorKey(semester, divide)), divide)
+  const shared = sharedStored?.length ? sharedStored : makeCoursesFromTemplate(tpl.shared)
+  const major  = majorStored?.length  ? majorStored  : makeCoursesFromTemplate(tpl.byMajor[divide] ?? [])
+  return syncMinorCourses(mergeMajorCourses(dedupeByCode(shared), major), semester, minorIds, blankCourse)
 }
 
 export function saveSemesterCourses(semester, divide, courses) {
@@ -79,9 +86,28 @@ export function saveSemesterCourses(semester, divide, courses) {
     return
   }
   if (!isMajorId(divide)) return // never write under an unknown major
-  const { shared, major } = splitMajorCourses(courses, semester, divide)
-  writeList(sharedKey(semester), shared)
-  writeList(majorKey(semester, divide), major)
+  const { shared, byMajor } = splitMajorCourses(courses, semester)
+  writeList(sharedKey(semester), dedupeByCode(shared))
+  writeList(majorKey(semester, divide), dedupeByCode(byMajor[divide] ?? []))
+  // Another major's course that reached this list is merged into that major's own key.
+  for (const [m, list] of Object.entries(byMajor)) {
+    if (m !== divide) writeList(majorKey(semester, m), mergeByCode(readCourseList(majorKey(semester, m)) ?? [], list, false))
+  }
+}
+
+// Store courses that belong to another major (typed or imported on this screen) under
+// that major's key, keeping whichever copy has more assessments filled.
+export function routeForeignMajorCourses(semester, divide, courses) {
+  if (!isMajorSemester(semester)) return { kept: courses, routed: [] }
+  const kept = [], routed = []
+  for (const c of courses) {
+    const owner = majorIdForCode(semester, c.courseCode)
+    if (owner && owner !== divide) {
+      writeList(majorKey(semester, owner), mergeByCode(readCourseList(majorKey(semester, owner)) ?? [], [c], false))
+      routed.push({ course: c, majorId: owner })
+    } else kept.push(c)
+  }
+  return { kept, routed }
 }
 
 // Reset: Sem 1/2 clear their divide; major semesters clear the shared list and this major's course.
@@ -109,39 +135,64 @@ export function normalizeSelection(sel, savedMajorId) {
   return isMajorId(savedMajorId) ? { ...sel, divide: savedMajorId } : null
 }
 
-// One-time move from the first sem3-unlock layout (whole list per major under
-// sgpa_calc_v2_sem3_<major>) to shared + per-major keys. Nothing is deleted: each
-// old key is copied to <key>_premigration before it is removed, and an existing
-// new key is never overwritten. Core marks are taken from the most complete list.
+// Move from the first sem3-unlock layout (whole list per major under
+// sgpa_calc_v2_sem3_<major>) to shared + per-major keys, and keep every course under
+// the key that owns it. Safe to run on every load:
+// - lists are merged course by course (more assessments filled wins; between old lists
+//   the last saved major wins a tie, against live data the live copy wins a tie);
+// - an old key that shows up again later (a stale tab) is merged the same way;
+// - <key>_premigration backups are written only once and never overwritten;
+// - unreadable old keys are backed up and removed too;
+// - new keys are written with setItem directly, so a failed write (quota) aborts the
+//   run before any old key is removed, and the next load retries.
 export function migrateMajorSemesterStorage() {
   try {
+    const savedMajor = loadMajor()?.id
     for (const sem of SEMESTERS.filter(s => s.majorSem)) {
+      const write = (key, list) => localStorage.setItem(key, JSON.stringify(list))
       const legacy = MAJORS
-        .map(m => ({ id: m.id, key: courseKey(sem.id, m.id), list: readCourseList(courseKey(sem.id, m.id)) }))
-        .filter(l => l.list)
-      if (!legacy.length) continue
-      const parts = legacy.map(l => ({ ...l, ...splitMajorCourses(l.list, sem.id, l.id) }))
-      for (const p of parts) {
-        if (localStorage.getItem(majorKey(sem.id, p.id)) === null) writeList(majorKey(sem.id, p.id), p.major)
+        .map(m => ({ id: m.id, key: courseKey(sem.id, m.id) }))
+        .filter(l => localStorage.getItem(l.key) !== null)
+        .map(l => ({ ...l, list: readCourseList(l.key) }))
+        // the last saved major goes last, so it wins ties between old lists
+        .sort((a, b) => (a.id === savedMajor) - (b.id === savedMajor))
+
+      // Live lists, plus anything stored under the wrong key in them.
+      const live = { shared: readCourseList(sharedKey(sem.id)) }
+      for (const m of MAJORS) live[m.id] = readCourseList(majorKey(sem.id, m.id))
+      const target = c => majorIdForCode(sem.id, c.courseCode) ?? 'shared'
+      const next = {}, dirty = new Set()
+      for (const [k, list] of Object.entries(live)) {
+        if (!list) continue
+        next[k] = list.filter(c => target(c) === k)
+        if (next[k].length !== list.length) dirty.add(k)
       }
-      if (localStorage.getItem(sharedKey(sem.id)) === null) {
-        const score = list => list.filter(hasMarks).length
-        const [base, ...others] = [...parts].sort((a, b) => score(b.shared) - score(a.shared))
-        const merged = [...base.shared]
-        for (const o of others) {
-          for (const c of o.shared) {
-            const i = merged.findIndex(x => x.courseCode === c.courseCode)
-            if (i < 0) merged.push(c)
-            else if (!hasMarks(merged[i]) && hasMarks(c)) merged[i] = c
-          }
+      for (const [k, list] of Object.entries(live)) {
+        for (const c of (list ?? []).filter(c => target(c) !== k)) {
+          const t = target(c)
+          next[t] = mergeByCode(next[t] ?? [], [c], false)
+          dirty.add(t)
         }
-        writeList(sharedKey(sem.id), merged)
       }
+
+      // Old lists: combine them (last saved major wins ties), then merge into live data (live wins ties).
+      let combined = {}
+      for (const l of legacy.filter(l => l.list)) {
+        for (const c of l.list) combined[target(c)] = mergeByCode(combined[target(c)] ?? [], [c], true)
+      }
+      for (const [k, list] of Object.entries(combined)) {
+        next[k] = mergeByCode(next[k] ?? [], list, false)
+        dirty.add(k)
+      }
+
+      for (const k of dirty) write(k === 'shared' ? sharedKey(sem.id) : majorKey(sem.id, k), next[k])
       for (const l of legacy) {
-        localStorage.setItem(`${l.key}_premigration`, localStorage.getItem(l.key))
+        const bk = `${l.key}_premigration`
+        if (localStorage.getItem(bk) === null) localStorage.setItem(bk, localStorage.getItem(l.key))
         localStorage.removeItem(l.key)
       }
     }
+    if (localStorage.getItem(LS_MAJOR_SEM_MIGRATED) === null) localStorage.setItem(LS_MAJOR_SEM_MIGRATED, new Date().toISOString())
   } catch {}
 }
 

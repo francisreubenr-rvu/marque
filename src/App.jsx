@@ -9,14 +9,15 @@ import ReverseCalculator from './components/ReverseCalculator'
 import Settings from './components/Settings'
 import CGPABox from './components/CGPABox'
 import Footer from './components/Footer'
+import { useToast } from './components/Toast'
 import { enrichCourse, calculateSGPA } from './utils/calculations'
 import { loadMajor, saveMajor, saveMinors } from './utils/localStorage'
 import { SEMESTERS, DIVIDES, MAJORS, MINORS, LS_KEY_PREFIX, LS_SELECTION } from './utils/constants'
-import { courseTemplate, isMajorSemester, isMajorId, syncMinorCourses, activeCourses } from './utils/semesterTemplates'
+import { courseTemplate, isMajorSemester, isMajorId, syncMinorCourses, activeCourses, dedupeByCode } from './utils/semesterTemplates'
 import {
   courseKey, blankCourse, makeCoursesFromTemplate, loadSemesterCourses, saveSemesterCourses,
   clearSemesterCourses, resolveMinors, normalizeSelection, migrateMajorSemesterStorage,
-  loadSelection, saveSelection,
+  loadSelection, saveSelection, routeForeignMajorCourses,
 } from './utils/semesterStore'
 
 // ── Migrate legacy sem1_CSE key → sem1_ES or sem1_EEX ───────
@@ -380,14 +381,8 @@ function FloatBtn({ onClick }) {
 
 // ── App ───────────────────────────────────────────────────────
 export default function App() {
-  const [selection,   setSelection]  = useState(() => {
-    const raw = loadSelection()
-    const sel = normalizeSelection(raw, loadMajor()?.id)
-    if (sel !== raw) saveSelection(sel)
-    // The saved major always follows the major on screen.
-    if (sel && isMajorSemester(sel.semester) && loadMajor()?.id !== sel.divide) saveMajor({ id: sel.divide })
-    return sel
-  })
+  const toast = useToast()
+  const [selection,   setSelection]  = useState(() => normalizeSelection(loadSelection(), loadMajor()?.id))
   const [minors,      setMinors]     = useState(() => resolveMinors())
   // allCourses includes inactive minor courses (kept for their marks); everything on screen uses `courses`.
   const [allCourses,  setCourses]    = useState(() => {
@@ -397,7 +392,15 @@ export default function App() {
   const courses = useMemo(() => activeCourses(allCourses), [allCourses])
   const [activeTab,   setActiveTab]  = useState('courses')
   const [switchOpen,  setSwitchOpen] = useState(false)
-  const [savedMajor,  setSavedMajor] = useState(() => loadMajor())
+  // The saved major always follows the major on screen.
+  const [savedMajor,  setSavedMajor] = useState(() =>
+    selection && isMajorSemester(selection.semester) ? { id: selection.divide } : loadMajor())
+
+  // Keep storage in step with a repaired selection and the on-screen major (writes stay out of render).
+  useEffect(() => {
+    if (JSON.stringify(loadSelection()) !== JSON.stringify(selection)) saveSelection(selection)
+    if (selection && isMajorSemester(selection.semester) && loadMajor()?.id !== selection.divide) saveMajor({ id: selection.divide })
+  }, [selection])
 
   useEffect(() => {
     if (selection) saveSemesterCourses(selection.semester, selection.divide, allCourses)
@@ -448,15 +451,38 @@ export default function App() {
     setCourses(prev => prev.map(c => c.id === id ? enrichCourse({ ...c, ...patch }) : c))
   }, [])
 
+  // Major semesters: another major's specialization course typed or imported here is
+  // stored under that major (side effects run here, outside any state updater) ...
+  const routeIncoming = useCallback((list) => {
+    if (!selection || !isMajorSemester(selection.semester)) return list
+    const { kept, routed } = routeForeignMajorCourses(selection.semester, selection.divide, list)
+    for (const r of routed) {
+      toast?.(`${r.course.courseCode} is the ${MAJORS.find(m => m.id === r.majorId)?.label} course, saved under that major`, 'info')
+    }
+    for (const c of kept) {
+      const minor = MINORS.find(m => (m.courses?.[selection.semester] ?? []).some(x => x.courseCode === c.courseCode))
+      if (minor && !minors.includes(minor.id)) toast?.(`${c.courseCode} is a ${minor.label} minor course; switch the minor on to count it`, 'info')
+    }
+    return kept
+  }, [selection, minors, toast])
+
+  // ... and the list is then made consistent: one row per code, minor rows following the switch. Pure.
+  const fitToSemester = useCallback((list) => {
+    if (!selection || !isMajorSemester(selection.semester)) return list
+    return syncMinorCourses(dedupeByCode(list), selection.semester, minors, blankCourse)
+  }, [selection, minors])
+
   const addCourse = useCallback((data) => {
-    setCourses(prev => [...prev, enrichCourse({
+    const course = enrichCourse({
       id: `c-${Date.now()}-${Math.random().toString(36).slice(2)}`,
       courseCode: data.courseCode, courseName: data.courseName, credits: data.credits,
       cie1Marks: data.cie1Marks ?? null, cie2Marks: data.cie2Marks ?? null,
       cie3Marks: data.cie3Marks ?? null, seeMarks:  data.seeMarks  ?? null,
       totalMarks: null, grade: null, gradePoint: null, creditGradeProduct: null,
-    })])
-  }, [])
+    })
+    const kept = routeIncoming([course])
+    if (kept.length) setCourses(prev => fitToSemester([...prev, ...kept]))
+  }, [routeIncoming, fitToSemester])
 
   const deleteCourse = useCallback((id) => {
     setCourses(prev => prev.filter(c => c.id !== id))
@@ -469,9 +495,11 @@ export default function App() {
       cie1Marks: null, cie2Marks: null, cie3Marks: null, seeMarks: null,
       totalMarks: null, grade: null, gradePoint: null, creditGradeProduct: null,
     }))
-    // Keep switched-off minor courses (and their marks) unless the import replaces them.
-    setCourses(prev => [...imported, ...prev.filter(c => c.inactive && !imported.some(n => n.courseCode === c.courseCode))])
-  }, [])
+    const kept = routeIncoming(imported)
+    // Keep switched-off minor courses (and their marks) unless the import replaces them,
+    // then apply the minor switch to the result so imported minor rows match it.
+    setCourses(prev => fitToSemester([...kept, ...prev.filter(c => c.inactive && !kept.some(n => n.courseCode === c.courseCode))]))
+  }, [routeIncoming, fitToSemester])
 
   const resetAll = useCallback(() => {
     if (!selection) return
