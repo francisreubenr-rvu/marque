@@ -62,15 +62,26 @@ export const SEM1_EEX_COURSES = [
   { courseCode: 'CS1925', courseName: 'Yoga & Wellbeing',                            credits: 2 },
 ]
 
+// Sem 3 University Elective: the 2-credit Multidisciplinary / University Elective slot
+// (Wednesday slot for every section). Students pick different electives, so the row is
+// generic; delete it and add your own course code if you want it named.
+export const SEM3_UNIVERSITY_ELECTIVE = { courseCode: 'UE', courseName: 'University Elective', credits: 2 }
+
 // Sem 3 common core, 2024 scheme, AY 2026-27 (same for every section, no EEX/ES split).
-// Order follows the attendance report; the major course slots in after CS2403.
+// Order follows the attendance report; the major course slots in after CS2403,
+// the University Elective comes last.
 export const SEM3_CORE_COURSES = [
   { courseCode: 'CS2806', courseName: 'Calculus',                          credits: 2 },
   { courseCode: 'CS2000', courseName: 'Design and Analysis of Algorithms', credits: 4 },
   { courseCode: 'CS2403', courseName: 'Computer Networks',                 credits: 3 },
   { courseCode: 'CS2404', courseName: 'Internet of Things',                credits: 3 },
   { courseCode: 'EE',     courseName: 'Environment Education',             credits: 2 },
+  SEM3_UNIVERSITY_ELECTIVE,
 ]
+
+// Core courses added after a semester went live. Saved lists get each one appended
+// once (blank marks) on load; see addLaterCoreCourses in semesterStore.js.
+export const CORE_ADDED_LATER = { sem3: [SEM3_UNIVERSITY_ELECTIVE] }
 
 // Minors are optional streams from other schools. When selected, every course
 // in the minor is added to the semester and counts toward SGPA.

@@ -6,7 +6,7 @@
 //   Major semesters:  sgpa_calc_v2_<sem>_shared           core, minor and custom courses, one copy for every major
 //                     sgpa_calc_v2_<sem>_major_<majorId>  that major's specialization course(s)
 import { enrichCourse } from './calculations.js'
-import { LS_KEY_PREFIX, LS_SELECTION, MAJORS, SEMESTERS } from './constants.js'
+import { LS_KEY_PREFIX, LS_SELECTION, MAJORS, SEMESTERS, CORE_ADDED_LATER } from './constants.js'
 import { loadMajor, loadMinors } from './localStorage.js'
 import {
   courseTemplate, isMajorSemester, isMajorId, splitMajorCourses, mergeMajorCourses,
@@ -15,6 +15,8 @@ import {
 
 // Set once the first-layout migration has run (value: ISO time of the first run).
 export const LS_MAJOR_SEM_MIGRATED = 'sgpa_major_sem_layout_v2'
+// "<sem>:<code>" entries of CORE_ADDED_LATER already appended to saved lists.
+export const LS_CORE_ADDED = 'sgpa_core_added_v1'
 
 export function courseKey(semester, divide) {
   return `${LS_KEY_PREFIX}_${semester}_${divide}`
@@ -144,7 +146,8 @@ export function normalizeSelection(sel, savedMajorId) {
 // - <key>_premigration backups are written only once and never overwritten;
 // - unreadable old keys are backed up and removed too;
 // - new keys are written with setItem directly, so a failed write (quota) aborts the
-//   run before any old key is removed, and the next load retries.
+//   run before any old key is removed, and the next load retries;
+// - afterwards core courses added later (the University Elective) are appended once.
 export function migrateMajorSemesterStorage() {
   try {
     const savedMajor = loadMajor()?.id
@@ -193,6 +196,44 @@ export function migrateMajorSemesterStorage() {
       }
     }
     if (localStorage.getItem(LS_MAJOR_SEM_MIGRATED) === null) localStorage.setItem(LS_MAJOR_SEM_MIGRATED, new Date().toISOString())
+  } catch {}
+  addLaterCoreCourses()
+}
+
+// Append core courses introduced after a semester went live (CORE_ADDED_LATER) to a
+// saved shared list that lacks them: blank marks, placed after the last core course,
+// every existing row left exactly as stored. Each addition is applied once, so a row
+// the user deletes stays deleted. Without a saved list the template already has it.
+export function addLaterCoreCourses() {
+  try {
+    let done
+    try { done = JSON.parse(localStorage.getItem(LS_CORE_ADDED)) } catch { done = null }
+    if (!Array.isArray(done)) done = []
+    let changed = false
+    for (const [sem, additions] of Object.entries(CORE_ADDED_LATER)) {
+      for (const add of additions) {
+        const tag = `${sem}:${add.courseCode}`
+        if (done.includes(tag)) continue
+        // old per-major lists still present (migration failed, e.g. storage full): retry next load
+        if (MAJORS.some(m => localStorage.getItem(courseKey(sem, m.id)) !== null)) continue
+        const key = sharedKey(sem)
+        let stored = null
+        try { stored = JSON.parse(localStorage.getItem(key)) } catch { stored = null }
+        const norm = code => (typeof code === 'string' ? code.trim().toUpperCase() : '')
+        const isCourse = c => c && typeof c === 'object' && typeof c.courseCode === 'string'
+        // only extend a list with at least one valid course; a junk list falls back to the template, which has it
+        if (Array.isArray(stored) && stored.some(isCourse) && !stored.some(c => isCourse(c) && norm(c.courseCode) === norm(add.courseCode))) {
+          const coreCodes = new Set(courseTemplate(sem, MAJORS[0].id, []).map(c => c.courseCode))
+          let at = stored.length
+          for (let i = stored.length - 1; i >= 0; i--) if (coreCodes.has(stored[i]?.courseCode)) { at = i + 1; break }
+          // setItem directly: if the write fails the tag is not recorded and the next load retries
+          localStorage.setItem(key, JSON.stringify([...stored.slice(0, at), blankCourse(add), ...stored.slice(at)]))
+        }
+        done.push(tag)
+        changed = true
+      }
+    }
+    if (changed) localStorage.setItem(LS_CORE_ADDED, JSON.stringify(done))
   } catch {}
 }
 
