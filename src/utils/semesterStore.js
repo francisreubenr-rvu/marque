@@ -214,10 +214,15 @@ export function addLaterCoreCourses() {
       for (const add of additions) {
         const tag = `${sem}:${add.courseCode}`
         if (done.includes(tag)) continue
+        // old per-major lists still present (migration failed, e.g. storage full): retry next load
+        if (MAJORS.some(m => localStorage.getItem(courseKey(sem, m.id)) !== null)) continue
         const key = sharedKey(sem)
         let stored = null
         try { stored = JSON.parse(localStorage.getItem(key)) } catch { stored = null }
-        if (Array.isArray(stored) && stored.length && !stored.some(c => c?.courseCode === add.courseCode)) {
+        const norm = code => (typeof code === 'string' ? code.trim().toUpperCase() : '')
+        const isCourse = c => c && typeof c === 'object' && typeof c.courseCode === 'string'
+        // only extend a list with at least one valid course; a junk list falls back to the template, which has it
+        if (Array.isArray(stored) && stored.some(isCourse) && !stored.some(c => isCourse(c) && norm(c.courseCode) === norm(add.courseCode))) {
           const coreCodes = new Set(courseTemplate(sem, MAJORS[0].id, []).map(c => c.courseCode))
           let at = stored.length
           for (let i = stored.length - 1; i >= 0; i--) if (coreCodes.has(stored[i]?.courseCode)) { at = i + 1; break }
