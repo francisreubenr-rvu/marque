@@ -62,21 +62,49 @@ export const SEM1_EEX_COURSES = [
   { courseCode: 'CS1925', courseName: 'Yoga & Wellbeing',                            credits: 2 },
 ]
 
+// Sem 3 common core, 2024 scheme, AY 2026-27 (same for every section, no EEX/ES split).
+// Order follows the attendance report; the major course slots in after CS2403.
+export const SEM3_CORE_COURSES = [
+  { courseCode: 'CS2806', courseName: 'Calculus',                          credits: 2 },
+  { courseCode: 'CS2000', courseName: 'Design and Analysis of Algorithms', credits: 4 },
+  { courseCode: 'CS2403', courseName: 'Computer Networks',                 credits: 3 },
+  { courseCode: 'CS2404', courseName: 'Internet of Things',                credits: 3 },
+  { courseCode: 'EE',     courseName: 'Environment Education',             credits: 2 },
+]
+
+// Minors are optional streams from other schools. When selected, every course
+// in the minor is added to the semester and counts toward SGPA.
+// To add a minor later, append an entry here with its per-semester courses.
+export const LS_MINORS = 'sgpa_minors_v1'
+
+export const MINORS = [
+  { id: 'crim', label: 'Criminology', color: '#C9A0FF', glyph: '◇',
+    desc: 'School of Law minor stream',
+    courses: {
+      sem3: [
+        { courseCode: 'LW2055', courseName: 'Fundamentals of Criminology', credits: 3 },
+        { courseCode: 'LW2032', courseName: 'Criminological Theories',     credits: 3 },
+      ],
+    },
+  },
+]
+
 // Backward-compat alias (used by legacy localStorage loads)
 export const DEFAULT_COURSES = EEX_COURSES
 
 // Semesters × divides
 // completed: true → grade-only entry mode (results already known)
-// comingSoon: true → course data not yet available (sems 3-8)
+// comingSoon: true → course data not yet available (sems 4-8)
+// majorSem: true → courses depend on the chosen major (Year 2 onwards), no EEX/ES divide
 export const SEMESTERS = [
   { id: 'sem1', label: 'Sem 1', available: true,  completed: true,  comingSoon: false },
   { id: 'sem2', label: 'Sem 2', available: true,  completed: false, comingSoon: false },
-  { id: 'sem3', label: 'Sem 3', available: true,  completed: false, comingSoon: true  },
-  { id: 'sem4', label: 'Sem 4', available: true,  completed: false, comingSoon: true  },
-  { id: 'sem5', label: 'Sem 5', available: true,  completed: false, comingSoon: true  },
-  { id: 'sem6', label: 'Sem 6', available: true,  completed: false, comingSoon: true  },
-  { id: 'sem7', label: 'Sem 7', available: true,  completed: false, comingSoon: true  },
-  { id: 'sem8', label: 'Sem 8', available: true,  completed: false, comingSoon: true  },
+  { id: 'sem3', label: 'Sem 3', available: true,  completed: false, comingSoon: false, majorSem: true },
+  { id: 'sem4', label: 'Sem 4', available: true,  completed: false, comingSoon: true,  majorSem: true },
+  { id: 'sem5', label: 'Sem 5', available: true,  completed: false, comingSoon: true,  majorSem: true },
+  { id: 'sem6', label: 'Sem 6', available: true,  completed: false, comingSoon: true,  majorSem: true },
+  { id: 'sem7', label: 'Sem 7', available: true,  completed: false, comingSoon: true,  majorSem: true },
+  { id: 'sem8', label: 'Sem 8', available: true,  completed: false, comingSoon: true,  majorSem: true },
 ]
 
 export const DIVIDES = {
@@ -135,36 +163,14 @@ export const MAJORS = [
     courses: ['AWS / Azure / GCP', 'Kubernetes', 'Infrastructure as Code', 'CI/CD Pipelines', 'Serverless'] },
 ]
 
+// Major specialization courses per semester. Sem 3 holds the real single
+// specialization course for each track (3 credits); sem 4 to 8 are still placeholders.
 export const MAJOR_SEMESTERS = {
   sem3: {
-    aiml:  [
-      { courseCode: 'CS2101', courseName: 'Machine Learning Fundamentals',    credits: 4 },
-      { courseCode: 'CS2102', courseName: 'Probability & Statistics for AI',  credits: 3 },
-      { courseCode: 'CS2103', courseName: 'Advanced Python & NumPy/Pandas',   credits: 3 },
-      { courseCode: 'CS2104', courseName: 'Algorithms for Data Science',      credits: 3 },
-      { courseCode: 'CS2105', courseName: 'Mathematics for Machine Learning', credits: 3 },
-    ],
-    ds: [
-      { courseCode: 'CS2201', courseName: 'Statistical Analysis & R',   credits: 4 },
-      { courseCode: 'CS2202', courseName: 'Database Systems & SQL',     credits: 3 },
-      { courseCode: 'CS2203', courseName: 'Data Visualisation',         credits: 3 },
-      { courseCode: 'CS2204', courseName: 'Python for Data Science',    credits: 3 },
-      { courseCode: 'CS2205', courseName: 'Business Analytics',         credits: 3 },
-    ],
-    cyber: [
-      { courseCode: 'CS2301', courseName: 'Network Security Fundamentals', credits: 4 },
-      { courseCode: 'CS2302', courseName: 'Cryptography & Number Theory',  credits: 3 },
-      { courseCode: 'CS2303', courseName: 'Linux & Bash Scripting',        credits: 3 },
-      { courseCode: 'CS2304', courseName: 'Ethical Hacking Introduction',  credits: 3 },
-      { courseCode: 'CS2305', courseName: 'Digital Forensics',             credits: 3 },
-    ],
-    cloud: [
-      { courseCode: 'CS2401', courseName: 'Cloud Computing Fundamentals', credits: 4 },
-      { courseCode: 'CS2402', courseName: 'Linux Administration',         credits: 3 },
-      { courseCode: 'CS2403', courseName: 'Networking & DevOps Basics',   credits: 3 },
-      { courseCode: 'CS2404', courseName: 'Virtualisation & Containers',  credits: 3 },
-      { courseCode: 'CS2405', courseName: 'Scripting & Automation',       credits: 3 },
-    ],
+    aiml:  [{ courseCode: 'CS2227', courseName: 'Artificial Intelligence and Machine Learning', credits: 3 }],
+    ds:    [{ courseCode: 'CS2231', courseName: 'Data Science',                                 credits: 3 }],
+    cyber: [{ courseCode: 'CS2405', courseName: 'Cyber Security',                               credits: 3 }],
+    cloud: [{ courseCode: 'CS2500', courseName: 'Cloud Computing and Big Data',                 credits: 3 }],
   },
   sem4: {
     aiml: [

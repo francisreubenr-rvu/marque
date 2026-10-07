@@ -10,8 +10,9 @@ import Settings from './components/Settings'
 import CGPABox from './components/CGPABox'
 import Footer from './components/Footer'
 import { enrichCourse, calculateSGPA } from './utils/calculations'
-import { loadMajor, saveMajor } from './utils/localStorage'
-import { SEMESTERS, DIVIDES, MAJORS, MAJOR_SEMESTERS, LS_KEY_PREFIX, LS_SELECTION, EEX_COURSES } from './utils/constants'
+import { loadMajor, saveMajor, loadMinors, saveMinors } from './utils/localStorage'
+import { SEMESTERS, DIVIDES, MAJORS, MINORS, LS_KEY_PREFIX, LS_SELECTION } from './utils/constants'
+import { courseTemplate, isMajorSemester, syncMinorCourses } from './utils/semesterTemplates'
 
 // ── Migrate legacy sem1_CSE key → sem1_ES or sem1_EEX ───────
 ;(() => {
@@ -55,23 +56,36 @@ function loadCoursesForDivide(semester, divide) {
 function saveCoursesForDivide(semester, divide, courses) {
   try { localStorage.setItem(courseKey(semester, divide), JSON.stringify(courses)) } catch {}
 }
-function makeCoursesFromTemplate(template) {
-  return template.map(c => enrichCourse({
+function blankCourse(c) {
+  return enrichCourse({
     id: `c-${Date.now()}-${Math.random().toString(36).slice(2)}`,
     ...c,
     cie1Marks: null, cie2Marks: null, cie3Marks: null, seeMarks: null,
     totalMarks: null, grade: null, gradePoint: null, creditGradeProduct: null,
-  }))
+  })
+}
+function makeCoursesFromTemplate(template) {
+  return template.map(blankCourse)
+}
+// Saved marks win; otherwise start from the template. Major semesters also
+// reconcile minor courses so toggling a minor never loses existing marks.
+function coursesForSelection(semester, divide, majorId, minorIds) {
+  const base = loadCoursesForDivide(semester, divide)
+    ?? makeCoursesFromTemplate(courseTemplate(semester, divide, majorId, minorIds))
+  return isMajorSemester(semester) ? syncMinorCourses(base, semester, minorIds, blankCourse) : base
 }
 
 // ── useCGPA ──────────────────────────────────────────────────
-function useCGPA(courses, selection) {
+function useCGPA(courses, selection, majorId) {
   return useMemo(() => {
     let cgp = 0, cr = 0
     const seen = new Set()
     for (const sem of SEMESTERS) {
-      if (!sem.available) continue
-      for (const div of (DIVIDES[sem.id] || [])) {
+      if (!sem.available || sem.comingSoon) continue
+      // Major semesters are stored per major; only the current major counts.
+      const semMajor = selection?.semester === sem.id ? selection.divide : majorId
+      const divs = sem.majorSem ? (semMajor ? [{ id: semMajor }] : []) : (DIVIDES[sem.id] || [])
+      for (const div of divs) {
         const isCur = selection && sem.id === selection.semester && div.id === selection.divide
         const sc = isCur ? courses : (() => {
           try {
@@ -86,7 +100,7 @@ function useCGPA(courses, selection) {
       }
     }
     return cr > 0 ? { cgpa: cgp / cr, sems: seen.size, credits: cr } : null
-  }, [courses, selection])
+  }, [courses, selection, majorId])
 }
 
 // ── Blueprint Background ──────────────────────────────────────
@@ -185,7 +199,7 @@ function NeuralOrbit({ savedMajor, onSelect }) {
 }
 
 // ── Selection Screen (SpaceSelectionScreen + NeuralOrbit overlay) ──
-function SelectionScreen({ onSelect, onClose, savedMajor, onMajorChange }) {
+function SelectionScreen({ onSelect, onClose, savedMajor, onMajorChange, minors, onToggleMinor }) {
   const [showMajor,    setShowMajor]    = useState(false)
   const [pendingRoute, setPendingRoute] = useState(null)
 
@@ -211,6 +225,8 @@ function SelectionScreen({ onSelect, onClose, savedMajor, onMajorChange }) {
         onClose={onClose}
         savedMajor={savedMajor}
         onSetMajor={handleSetMajor}
+        minors={minors}
+        onToggleMinor={onToggleMinor}
       />
       {showMajor && (
         <div
@@ -290,12 +306,14 @@ function SelectionScreen({ onSelect, onClose, savedMajor, onMajorChange }) {
 }
 
 // ── Hero ─────────────────────────────────────────────────────
-function Hero({ selection, sgpa, courses, savedMajor }) {
-  const isMajorSem = selection ? (SEMESTERS.find(s => s.id === selection.semester)?.comingSoon ?? false) : false
+function Hero({ selection, sgpa, courses, savedMajor, minors = [], onToggleMinor }) {
+  const isMajorSem = selection ? isMajorSemester(selection.semester) : false
+  const semMinors  = selection ? MINORS.filter(m => m.courses?.[selection.semester]?.length) : []
   const majorData  = useMemo(() => {
-    if (!isMajorSem || !savedMajor) return null
-    return MAJORS.find(x => x.id === savedMajor.id) ?? null
-  }, [isMajorSem, savedMajor])
+    if (!isMajorSem) return null
+    // The selection's divide is the major whose courses are on screen.
+    return MAJORS.find(x => x.id === selection.divide) ?? MAJORS.find(x => x.id === savedMajor?.id) ?? null
+  }, [isMajorSem, selection, savedMajor])
 
   return (
     <div style={{ position:'relative', overflow:'hidden', background:'#090c15', minHeight:'48vh', display:'flex', alignItems:'flex-end' }}>
@@ -308,7 +326,7 @@ function Hero({ selection, sgpa, courses, savedMajor }) {
             RV University · SGPA Calculator
             {selection && (
               <span style={{ marginLeft:12, padding:'2px 8px', background:'rgba(241,180,151,.1)', color:'#F1B497' }}>
-                {selection.semester.toUpperCase()} · {selection.divide}
+                {selection.semester.toUpperCase()}{!isMajorSem && ` · ${selection.divide}`}
               </span>
             )}
             {majorData && (
@@ -316,6 +334,22 @@ function Hero({ selection, sgpa, courses, savedMajor }) {
                 {majorData.label}
               </span>
             )}
+            {isMajorSem && semMinors.map(m => {
+              const on = minors.includes(m.id)
+              const codes = m.courses[selection.semester].map(c => c.courseCode).join(', ')
+              return (
+                <button key={m.id} type="button" onClick={() => onToggleMinor?.(m.id)}
+                  title={on ? `Remove ${m.label} minor (${codes})` : `Add ${m.label} minor (${codes})`}
+                  aria-pressed={on}
+                  style={{ marginLeft:8, padding:'2px 8px', cursor:'pointer', font:'inherit', letterSpacing:'inherit', textTransform:'inherit',
+                    background: on ? `${m.color}15` : 'transparent',
+                    color: on ? m.color : 'rgba(255,255,255,.38)',
+                    border: `1px ${on ? 'solid' : 'dashed'} ${on ? m.color + '30' : 'rgba(255,255,255,.18)'}`,
+                    transition:'color .15s, border-color .15s, background .15s' }}>
+                  {on ? `${m.glyph} ${m.label} minor` : `+ ${m.label} minor`}
+                </button>
+              )
+            })}
           </p>
           <h1 style={{ fontFamily:"'Hanken Grotesk',sans-serif", fontWeight:300, fontSize:'clamp(48px,9vw,118px)', letterSpacing:'-3px', color:'#F5EFEB', lineHeight:0.92, margin:0 }}>
             <span style={{ display:'block', overflow:'hidden' }}><span style={{ display:'block', animation:'clipReveal .8s cubic-bezier(.76,0,.24,1) .2s both' }}>SGPA</span></span>
@@ -372,33 +406,37 @@ export default function App() {
   const [selection,   setSelection]  = useState(() => loadSelection())
   const [courses,     setCourses]    = useState(() => {
     if (!selection) return []
-    return loadCoursesForDivide(selection.semester, selection.divide)
-        ?? makeCoursesFromTemplate(
-             (DIVIDES[selection.semester]?.find(d => d.id === selection.divide)?.courses) ?? EEX_COURSES
-           )
+    return coursesForSelection(selection.semester, selection.divide, loadMajor()?.id, loadMinors())
   })
   const [activeTab,   setActiveTab]  = useState('courses')
   const [switchOpen,  setSwitchOpen] = useState(false)
   const [savedMajor,  setSavedMajor] = useState(() => loadMajor())
+  const [minors,      setMinors]     = useState(() => loadMinors())
 
   useEffect(() => {
     if (selection) saveCoursesForDivide(selection.semester, selection.divide, courses)
   }, [courses, selection])
 
   const handleSelect = useCallback((semester, divide) => {
+    const majorId = loadMajor()?.id
+    // Major semesters have no EEX/ES split: marks are stored per major instead.
+    if (isMajorSemester(semester) && majorId) divide = majorId
     const sel = { semester, divide }
     saveSelection(sel)
     setSelection(sel)
-    const divideData = DIVIDES[semester]?.find(d => d.id === divide)
-    const majorId    = loadMajor()?.id
-    const majorTpl   = majorId ? MAJOR_SEMESTERS[semester]?.[majorId] : null
-    setCourses(
-      loadCoursesForDivide(semester, divide)
-      ?? makeCoursesFromTemplate(divideData?.courses ?? majorTpl ?? EEX_COURSES)
-    )
+    setCourses(coursesForSelection(semester, divide, majorId, loadMinors()))
     setSwitchOpen(false)
     setActiveTab('courses')
   }, [])
+
+  const toggleMinor = useCallback((minorId) => {
+    const next = minors.includes(minorId) ? minors.filter(id => id !== minorId) : [...minors, minorId]
+    saveMinors(next)
+    setMinors(next)
+    if (selection && isMajorSemester(selection.semester)) {
+      setCourses(prev => syncMinorCourses(prev, selection.semester, next, blankCourse))
+    }
+  }, [minors, selection])
 
   const updateCourse = useCallback((id, patch) => {
     setCourses(prev => prev.map(c => c.id === id ? enrichCourse({ ...c, ...patch }) : c))
@@ -429,10 +467,9 @@ export default function App() {
 
   const resetAll = useCallback(() => {
     if (!selection) return
-    const divideData = DIVIDES[selection.semester]?.find(d => d.id === selection.divide)
-    setCourses(makeCoursesFromTemplate(divideData?.courses ?? EEX_COURSES))
+    setCourses(makeCoursesFromTemplate(courseTemplate(selection.semester, selection.divide, savedMajor?.id, minors)))
     try { localStorage.removeItem(courseKey(selection.semester, selection.divide)) } catch {}
-  }, [selection])
+  }, [selection, savedMajor, minors])
 
   const sgpa         = calculateSGPA(courses)
   const scored       = courses.filter(c => c.creditGradeProduct !== null)
@@ -440,11 +477,11 @@ export default function App() {
   const totalCGP     = scored.reduce((s, c) => s + c.creditGradeProduct, 0)
   const isCompleted  = SEMESTERS.find(s => s.id === selection?.semester)?.completed ?? false
   const isComingSoon = SEMESTERS.find(s => s.id === selection?.semester)?.comingSoon ?? false
-  const cgpaData     = useCGPA(courses, selection)
+  const cgpaData     = useCGPA(courses, selection, savedMajor?.id)
 
   // No selection — show full-screen space selector
   if (!selection && !switchOpen) {
-    return <SelectionScreen onSelect={handleSelect} savedMajor={savedMajor} onMajorChange={setSavedMajor} />
+    return <SelectionScreen onSelect={handleSelect} savedMajor={savedMajor} onMajorChange={setSavedMajor} minors={minors} onToggleMinor={toggleMinor} />
   }
 
   // Switch overlay
@@ -457,7 +494,7 @@ export default function App() {
         exit={{ opacity:0 }}
         transition={{ duration:.25 }}
       >
-        <SelectionScreen onSelect={handleSelect} onClose={() => setSwitchOpen(false)} savedMajor={savedMajor} onMajorChange={setSavedMajor} />
+        <SelectionScreen onSelect={handleSelect} onClose={() => setSwitchOpen(false)} savedMajor={savedMajor} onMajorChange={setSavedMajor} minors={minors} onToggleMinor={toggleMinor} />
       </motion.div>
     )
   }
@@ -467,7 +504,7 @@ export default function App() {
       <Header activeTab={activeTab} setActiveTab={setActiveTab} selection={selection} sgpa={sgpa} onSwitch={() => setSwitchOpen(true)} />
 
       {activeTab === 'courses' && (
-        <Hero selection={selection} sgpa={sgpa} courses={courses} savedMajor={savedMajor} />
+        <Hero selection={selection} sgpa={sgpa} courses={courses} savedMajor={savedMajor} minors={minors} onToggleMinor={toggleMinor} />
       )}
 
       {activeTab !== 'courses' && (

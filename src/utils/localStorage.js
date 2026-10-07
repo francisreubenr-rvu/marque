@@ -1,4 +1,4 @@
-import { LS_KEY, LS_MAJOR } from './constants'
+import { LS_KEY, LS_MAJOR, LS_MINORS, MINORS } from './constants'
 
 export function loadState() {
   try {
@@ -29,4 +29,16 @@ export function loadMajor() {
 
 export function saveMajor(major) {
   try { localStorage.setItem(LS_MAJOR, JSON.stringify(major)) } catch {}
+}
+
+// Selected minor ids, e.g. ['crim']. Stored like the major so it survives reloads.
+export function loadMinors() {
+  try {
+    const v = JSON.parse(localStorage.getItem(LS_MINORS))
+    return Array.isArray(v) ? v.filter(id => MINORS.some(m => m.id === id)) : []
+  } catch { return [] }
+}
+
+export function saveMinors(ids) {
+  try { localStorage.setItem(LS_MINORS, JSON.stringify(ids)) } catch {}
 }

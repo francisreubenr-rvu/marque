@@ -116,7 +116,7 @@ export default function Settings({ courses, sgpa, onReset, onImport, onSwitchDiv
 
         {onSwitchDivide && (
           <Row icon={Shuffle} title="Switch Semester / Divide"
-            desc={selection ? `Currently: ${selection.semester.toUpperCase()} · ${selection.divide}` : 'Change your semester or divide'}>
+            desc={selection ? `Currently: ${selection.semester.toUpperCase()} · ${selection.divide.toUpperCase()}` : 'Change your semester or divide'}>
             <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: .98 }}
               onClick={() => setShowSwitch(true)} className="btn-pill btn-out">
               Switch
