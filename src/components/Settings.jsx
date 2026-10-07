@@ -4,6 +4,7 @@ import { Download, Link, RotateCcw, Copy, Check, Upload, Shuffle } from 'lucide-
 import Modal from './Modal'
 import { useToast } from './Toast'
 import { exportToCSV, encodeShareState } from '../utils/calculations'
+import { isMajorSemester } from '../utils/semesterTemplates'
 
 function Row({ icon: Icon, title, desc, children }) {
   return (
@@ -116,7 +117,7 @@ export default function Settings({ courses, sgpa, onReset, onImport, onSwitchDiv
 
         {onSwitchDivide && (
           <Row icon={Shuffle} title="Switch Semester / Divide"
-            desc={selection ? `Currently: ${selection.semester.toUpperCase()} · ${selection.divide}` : 'Change your semester or divide'}>
+            desc={selection ? `Currently: ${selection.semester.toUpperCase()} · ${String(selection.divide ?? '').toUpperCase()}` : 'Change your semester or divide'}>
             <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: .98 }}
               onClick={() => setShowSwitch(true)} className="btn-pill btn-out">
               Switch
@@ -189,6 +190,12 @@ CS2001,Computer Networks,3`}
         <p className="text-sm font-body mb-1" style={{ color: '#F5EFEB', lineHeight: 1.65 }}>
           This will clear all marks and custom courses, restoring the default course list.
         </p>
+        {selection && isMajorSemester(selection.semester) && (
+          <p className="text-sm font-body mb-1" style={{ color: '#F1B497', lineHeight: 1.65 }}>
+            In {selection.semester.replace('sem', 'Sem ')} this also clears the core and minor course marks for every major,
+            because they are shared, plus this major's specialization course marks. Other majors keep their specialization course marks.
+          </p>
+        )}
         <p className="text-xs font-mono mb-6" style={{ color: '#8B8986' }}>This action cannot be undone.</p>
         <div className="flex gap-3">
           <button onClick={() => setShowReset(false)} className="btn-pill btn-out flex-1 justify-center">Cancel</button>
