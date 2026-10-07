@@ -482,6 +482,7 @@ export default function App() {
     })
     const kept = routeIncoming([course])
     if (kept.length) setCourses(prev => fitToSemester([...prev, ...kept]))
+    return kept.length > 0
   }, [routeIncoming, fitToSemester])
 
   const deleteCourse = useCallback((id) => {

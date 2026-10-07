@@ -193,7 +193,7 @@ CS2001,Computer Networks,3`}
         {selection && isMajorSemester(selection.semester) && (
           <p className="text-sm font-body mb-1" style={{ color: '#F1B497', lineHeight: 1.65 }}>
             In {selection.semester.replace('sem', 'Sem ')} this also clears the core and minor course marks for every major,
-            because they are shared. Each major keeps its own specialization course marks.
+            because they are shared, plus this major's specialization course marks. Other majors keep their specialization course marks.
           </p>
         )}
         <p className="text-xs font-mono mb-6" style={{ color: '#8B8986' }}>This action cannot be undone.</p>

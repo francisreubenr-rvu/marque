@@ -29,7 +29,7 @@ export function ToastProvider({ children }) {
   return (
     <ToastContext.Provider value={addToast}>
       {children}
-      <div className="fixed top-5 right-5 z-50 flex flex-col gap-2 pointer-events-none">
+      <div className="fixed top-20 right-5 z-[200] flex flex-col gap-2 pointer-events-none">
         <AnimatePresence>
           {toasts.map(t => {
             const Icon = ICONS[t.type] ?? Info
