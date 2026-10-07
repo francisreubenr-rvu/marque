@@ -8,7 +8,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "check:sem3": "node scripts/check-sem3.mjs",
-    "predeploy": "vite build --base=/marque/",
+    "predeploy": "npm run check:sem3 && vite build --base=/marque/",
     "deploy": "gh-pages -d dist"
   },
   "dependencies": {

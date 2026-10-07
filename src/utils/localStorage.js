@@ -1,4 +1,5 @@
-import { LS_KEY, LS_MAJOR, LS_MINORS, MINORS } from './constants'
+import { LS_KEY, LS_MAJOR, LS_MINORS } from './constants.js'
+import { normalizeMinors } from './semesterTemplates.js'
 
 export function loadState() {
   try {
@@ -32,11 +33,9 @@ export function saveMajor(major) {
 }
 
 // Selected minor ids, e.g. ['crim']. Stored like the major so it survives reloads.
+// Returns null when the setting is missing or malformed (see resolveMinors for the fallback).
 export function loadMinors() {
-  try {
-    const v = JSON.parse(localStorage.getItem(LS_MINORS))
-    return Array.isArray(v) ? v.filter(id => MINORS.some(m => m.id === id)) : []
-  } catch { return [] }
+  try { return normalizeMinors(JSON.parse(localStorage.getItem(LS_MINORS))) } catch { return null }
 }
 
 export function saveMinors(ids) {

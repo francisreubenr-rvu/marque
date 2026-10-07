@@ -1,4 +1,4 @@
-import { GRADING_SCALE, ASSESSMENT_CAPS } from './constants'
+import { GRADING_SCALE, ASSESSMENT_CAPS } from './constants.js'
 
 // RVU pass thresholds: 40% per CIE, 28/70 cumulative CIE
 const CIE_MIN = { cie1: 8, cie2: 10, cie3: 10 }
@@ -76,10 +76,11 @@ export function enrichCourse(course) {
 }
 
 export function calculateSGPA(courses) {
-  const scored = courses.filter(c => c.creditGradeProduct !== null)
+  // Inactive courses (a minor that is switched off) keep their marks but do not count.
+  const scored = courses.filter(c => !c.inactive && c.creditGradeProduct !== null)
   if (scored.length === 0) return null
-  const totalCGP     = scored.reduce((s, c) => s + c.creditGradeProduct, 0)
-  const totalCredits = scored.reduce((s, c) => s + c.credits, 0)
+  const totalCGP     = scored.reduce((s, c) => s + Number(c.creditGradeProduct), 0)
+  const totalCredits = scored.reduce((s, c) => s + (Number(c.credits) || 0), 0)
   return totalCredits > 0 ? totalCGP / totalCredits : null
 }
 

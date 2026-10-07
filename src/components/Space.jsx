@@ -712,7 +712,7 @@ function PlanetCard({ planet, onRoute, onDismiss, savedMajor, onChangeMajor, min
   const majorData = majorSem && savedMajor ? MAJORS.find(m => m.id === savedMajor.id) : null
   const live      = majorSem && !planet.comingSoon
   const semMinors = live ? MINORS.filter(m => m.courses?.[planet.sem]?.length) : []
-  const load      = live && majorData ? courseTemplate(planet.sem, majorData.id, majorData.id, minors) : null
+  const load      = live && majorData ? courseTemplate(planet.sem, majorData.id, minors) : null
   return (
     <div style={{
       position: 'fixed', bottom: 72, left: '50%', transform: 'translateX(-50%)',
