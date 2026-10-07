@@ -63,9 +63,9 @@ export const SEM1_EEX_COURSES = [
 ]
 
 // Sem 3 University Elective: the 2-credit Multidisciplinary / University Elective slot
-// (Wednesday slot for every section). Code and name are Francis's elective, the CVPA
-// art elective LAVP1106 Basic Guitar Course L1.
-export const SEM3_UNIVERSITY_ELECTIVE = { courseCode: 'LAVP1106', courseName: 'Basic Guitar Course L1', credits: 2 }
+// (Wednesday slot for every section). Students pick different electives, so the row is
+// generic; delete it and add your own course code if you want it named.
+export const SEM3_UNIVERSITY_ELECTIVE = { courseCode: 'UE', courseName: 'University Elective', credits: 2 }
 
 // Sem 3 common core, 2024 scheme, AY 2026-27 (same for every section, no EEX/ES split).
 // Order follows the attendance report; the major course slots in after CS2403,
