@@ -107,10 +107,6 @@ button, a, input, select, textarea { touch-action: manipulation; }
   from { transform: translateY(110%); }
   to   { transform: translateY(0);    }
 }
-@keyframes majorReveal {
-  from { opacity: 0; transform: scale(0.88) translateY(18px); }
-  to   { opacity: 1; transform: scale(1)    translateY(0);    }
-}
 @keyframes rippleExpand {
   0%   { transform: translate(-50%,-50%) scale(1);  opacity: .35; }
   100% { transform: translate(-50%,-50%) scale(14); opacity: 0;   }

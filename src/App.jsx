@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import SpaceSelectionScreen from './components/Space'
-import { TiltCard, OrbitalRing, RippleBtn, ParticleField, ScanLine, CursorFollower } from './components/animations'
+import { RippleBtn, ParticleField, ScanLine, CursorFollower } from './components/animations'
 import Header from './components/Header'
 import CourseManager from './components/CourseManager'
 import Dashboard from './components/Dashboard'
@@ -11,13 +11,13 @@ import CGPABox from './components/CGPABox'
 import Footer from './components/Footer'
 import { useToast } from './components/Toast'
 import { enrichCourse, calculateSGPA } from './utils/calculations'
-import { loadMajor, saveMajor, saveMinors } from './utils/localStorage'
-import { SEMESTERS, DIVIDES, MAJORS, MINORS, LS_KEY_PREFIX, LS_SELECTION } from './utils/constants'
-import { courseTemplate, isMajorSemester, isMajorId, syncMinorCourses, activeCourses, dedupeByCode } from './utils/semesterTemplates'
+import { saveMinorOn } from './utils/localStorage'
+import { SEMESTERS, DIVIDES, MINOR_COURSES, LS_KEY_PREFIX, LS_SELECTION } from './utils/constants'
+import { courseTemplate, isCommonSemester, isMinorCode, syncMinorCourses, activeCourses, dedupeByCode } from './utils/semesterTemplates'
 import {
   courseKey, blankCourse, makeCoursesFromTemplate, loadSemesterCourses, saveSemesterCourses,
-  clearSemesterCourses, resolveMinors, normalizeSelection, migrateMajorSemesterStorage,
-  loadSelection, saveSelection, routeForeignMajorCourses,
+  clearSemesterCourses, resolveMinorOn, normalizeSelection, migrateStorage,
+  loadSelection, saveSelection,
 } from './utils/semesterStore'
 
 // ── Migrate legacy sem1_CSE key → sem1_ES or sem1_EEX ───────
@@ -41,15 +41,15 @@ import {
   } catch {}
 })()
 
-// ── Migrate the first sem3-unlock layout (whole Sem 3 list per major) ──
-migrateMajorSemesterStorage()
+// ── Migrate older Sem 3 layouts (per-major lists, named minor) to generic slots ──
+migrateStorage()
 
 // ── useCGPA ──────────────────────────────────────────────────
 // Credit-weighted over every scored, active course of each counted semester.
 // Sem 1/2: on the semester being viewed only the divide on screen counts; for other
 // semesters every stored divide still counts, because the app does not record which
-// divide a student belongs to there. Major semesters count the on-screen (or saved) major.
-function useCGPA(courses, selection, majorId, minors) {
+// divide a student belongs to there. Common semesters count their one list.
+function useCGPA(courses, selection, minorOn) {
   return useMemo(() => {
     let cgp = 0, cr = 0
     const seen = new Set()
@@ -57,10 +57,8 @@ function useCGPA(courses, selection, majorId, minors) {
       if (!sem.available || sem.comingSoon) continue
       const isCurSem = selection?.semester === sem.id
       let lists
-      if (sem.majorSem) {
-        const m = isCurSem ? selection.divide : majorId
-        if (!isMajorId(m)) continue
-        lists = [isCurSem ? courses : activeCourses(loadSemesterCourses(sem.id, m, minors))]
+      if (sem.common) {
+        lists = [isCurSem ? courses : activeCourses(loadSemesterCourses(sem.id, null, minorOn))]
       } else {
         const divs = isCurSem ? [{ id: selection.divide }] : (DIVIDES[sem.id] || [])
         lists = divs.map(div => isCurSem ? courses : (() => {
@@ -78,7 +76,7 @@ function useCGPA(courses, selection, majorId, minors) {
       }
     }
     return cr > 0 ? { cgpa: cgp / cr, sems: seen.size, credits: cr } : null
-  }, [courses, selection, majorId, minors])
+  }, [courses, selection, minorOn])
 }
 
 // ── Blueprint Background ──────────────────────────────────────
@@ -106,192 +104,12 @@ function BlueprintBg() {
   )
 }
 
-// ── Modal starfield (deterministic, no Math.random at module scope) ──
-const MODAL_STARS = Array.from({ length: 32 }, (_, i) => ({
-  id:    i,
-  left:  (i * 37 + 7)  % 98,
-  top:   (i * 61 + 11) % 95,
-  size:  1 + (i % 4) * 0.55,
-  delay: i * 0.38,
-  dur:   2.6 + (i % 6) * 0.85,
-}))
-
-// ── Neural Orbit — Major Selector ─────────────────────────────
-function NeuralOrbit({ savedMajor, onSelect }) {
-  const [hov, setHov] = useState(null)
-  const [sel, setSel] = useState(null)
-
-  const handleSelect = (m) => {
-    setSel(m.id)
-    setTimeout(() => { saveMajor({ id: m.id }); onSelect(m) }, 550)
-  }
-
-  return (
-    <div style={{ width:'100%', maxWidth:640, animation:'fadeUp .55s ease .1s both' }}>
-      <div style={{ display:'grid', gridTemplateColumns:'repeat(2, 1fr)', gap:14 }}>
-        {MAJORS.map((m, i) => {
-          const isH   = hov === m.id
-          const isS   = sel === m.id
-          const isCur = savedMajor?.id === m.id
-          return (
-            <TiltCard key={m.id} intensity={5}
-              style={{ position:'relative', overflow:'hidden', cursor:'pointer', border:`1px solid ${isH || isCur ? m.color + '70' : m.color + '25'}`, background:`radial-gradient(ellipse at 30% 30%, ${m.color}10, transparent 65%), rgba(255,255,255,.03)`, animation:`majorReveal .5s ease ${0.08*i}s both`, transition:'border-color .2s' }}
-              onMouseEnter={() => setHov(m.id)} onMouseLeave={() => setHov(null)}
-              onClick={() => handleSelect(m)}
-            >
-              <div style={{ position:'absolute', inset:0, background:`linear-gradient(135deg, ${m.color}12, transparent 60%, ${m.color}06)`, backgroundSize:'200% 200%', animation:'gradientShift 5s ease infinite', animationDelay:`${i*1.2}s` }} />
-              {isS && (
-                <div style={{ position:'absolute', inset:0, background:`${m.color}25`, zIndex:8, display:'flex', alignItems:'center', justifyContent:'center', animation:'fadeUp .2s ease both' }}>
-                  <span style={{ fontFamily:"'DM Mono',monospace", fontSize:11, color:m.color, letterSpacing:'2px' }}>SELECTED ✓</span>
-                </div>
-              )}
-              {isCur && !isS && (
-                <div style={{ position:'absolute', top:10, right:10, fontFamily:"'DM Mono',monospace", fontSize:8, letterSpacing:'1.5px', textTransform:'uppercase', color:m.color, background:`${m.color}18`, padding:'2px 8px', border:`1px solid ${m.color}40`, zIndex:2 }}>Current</div>
-              )}
-              <div style={{ position:'relative', zIndex:1, padding:'22px 22px 18px' }}>
-                <div style={{ position:'relative', width:68, height:68, marginBottom:16 }}>
-                  <OrbitalRing color={m.color} size={68} speed={7} dotSize={5} />
-                  <OrbitalRing color={m.color} size={48} speed={4.5} dotSize={3} reverse />
-                  <div style={{ position:'absolute', inset:0, display:'flex', alignItems:'center', justifyContent:'center', fontSize:26, color:m.color, textShadow:isH?`0 0 20px ${m.color}, 0 0 40px ${m.color}60`:'none', transition:'text-shadow .25s' }}>
-                    {m.glyph}
-                  </div>
-                </div>
-                <h3 style={{ fontFamily:"'Hanken Grotesk',sans-serif", fontWeight:300, fontSize:20, color:'#F5EFEB', marginBottom:5 }}>{m.label}</h3>
-                <p style={{ fontFamily:"'DM Mono',monospace", fontSize:9, color:'#8B8986', letterSpacing:'1px', textTransform:'uppercase', marginBottom:14 }}>{m.desc}</p>
-                <div style={{ overflow:'hidden', maxHeight:isH?'120px':0, transition:'max-height .35s ease' }}>
-                  <div style={{ borderTop:`1px solid ${m.color}25`, paddingTop:12, display:'flex', flexDirection:'column', gap:4 }}>
-                    {m.courses.map((c, ci) => (
-                      <div key={ci} style={{ display:'flex', alignItems:'center', gap:7, fontFamily:"'DM Mono',monospace", fontSize:10, color:'rgba(255,255,255,.6)', animation:isH?`fadeUp .22s ease ${ci*0.06}s both`:'none' }}>
-                        <div style={{ width:4, height:4, borderRadius:'50%', background:m.color, flexShrink:0, boxShadow:`0 0 6px ${m.color}` }} />{c}
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              </div>
-            </TiltCard>
-          )
-        })}
-      </div>
-    </div>
-  )
-}
-
-// ── Selection Screen (SpaceSelectionScreen + NeuralOrbit overlay) ──
-function SelectionScreen({ onSelect, onClose, savedMajor, onMajorChange, minors, onToggleMinor }) {
-  const [showMajor,    setShowMajor]    = useState(false)
-  const [pendingRoute, setPendingRoute] = useState(null)
-
-  const handleSetMajor = (data) => {
-    if (data?.pendingSem) setPendingRoute(data)
-    setShowMajor(true)
-  }
-
-  const handleMajorSelect = (m) => {
-    saveMajor({ id: m.id })
-    onMajorChange?.({ id: m.id })
-    setShowMajor(false)
-    if (pendingRoute) {
-      onSelect(pendingRoute.pendingSem, pendingRoute.pendingDivide)
-      setPendingRoute(null)
-    }
-  }
-
-  return (
-    <>
-      <SpaceSelectionScreen
-        onSelect={onSelect}
-        onClose={onClose}
-        savedMajor={savedMajor}
-        onSetMajor={handleSetMajor}
-        minors={minors}
-        onToggleMinor={onToggleMinor}
-      />
-      {showMajor && (
-        <div
-          style={{ position:'fixed', inset:0, zIndex:600, background:'rgba(4,6,14,0.92)', backdropFilter:'blur(12px)', display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', padding:'40px 24px', animation:'fadeIn .3s ease both', overflow:'hidden' }}
-          onClick={e => { if (e.target === e.currentTarget) setShowMajor(false) }}
-        >
-          {/* ── Cosmic backdrop ── */}
-          <div style={{ position:'absolute', inset:0, pointerEvents:'none', overflow:'hidden' }}>
-            {/* Floating nebula blobs */}
-            <div style={{ position:'absolute', left:'-8%', top:'18%', width:440, height:240, background:'radial-gradient(ellipse, rgba(99,102,241,.10) 0%, transparent 68%)', borderRadius:'50%', animation:'float 13s ease-in-out infinite' }} />
-            <div style={{ position:'absolute', right:'-6%', top:'28%', width:380, height:210, background:'radial-gradient(ellipse, rgba(241,180,151,.08) 0%, transparent 68%)', borderRadius:'50%', animation:'float 17s ease-in-out 3s infinite' }} />
-            <div style={{ position:'absolute', left:'32%', bottom:'4%', width:320, height:170, background:'radial-gradient(ellipse, rgba(16,185,129,.07) 0%, transparent 68%)', borderRadius:'50%', animation:'float 11s ease-in-out 6s infinite' }} />
-            <div style={{ position:'absolute', right:'22%', top:'4%', width:290, height:150, background:'radial-gradient(ellipse, rgba(239,68,68,.06) 0%, transparent 68%)', borderRadius:'50%', animation:'float 19s ease-in-out 1.5s infinite' }} />
-
-            {/* Concentric orbit rings */}
-            <div style={{ position:'absolute', top:'50%', left:'50%', width:820, height:820, transform:'translate(-50%,-50%)', border:'1px solid rgba(241,180,151,.04)', borderRadius:'50%', animation:'orbitalSpin 120s linear infinite' }} />
-            <div style={{ position:'absolute', top:'50%', left:'50%', width:580, height:580, transform:'translate(-50%,-50%)', border:'1px solid rgba(99,102,241,.06)', borderRadius:'50%', animation:'orbitalSpin 80s linear reverse infinite' }} />
-            <div style={{ position:'absolute', top:'50%', left:'50%', width:340, height:340, transform:'translate(-50%,-50%)', border:'1px solid rgba(255,255,255,.03)', borderRadius:'50%' }} />
-
-            {/* Neural-network connection SVG */}
-            <svg style={{ position:'absolute', inset:0, width:'100%', height:'100%', opacity:.14 }} viewBox="0 0 800 500" preserveAspectRatio="xMidYMid slice">
-              {/* Grid cross-wires */}
-              <line x1="200" y1="130" x2="600" y2="130" stroke="#818cf8" strokeWidth=".6" strokeDasharray="4 10"/>
-              <line x1="200" y1="370" x2="600" y2="370" stroke="#818cf8" strokeWidth=".6" strokeDasharray="4 10"/>
-              <line x1="200" y1="130" x2="200" y2="370" stroke="#818cf8" strokeWidth=".6" strokeDasharray="4 10"/>
-              <line x1="600" y1="130" x2="600" y2="370" stroke="#818cf8" strokeWidth=".6" strokeDasharray="4 10"/>
-              {/* Diagonals */}
-              <line x1="200" y1="130" x2="600" y2="370" stroke="#F1B497" strokeWidth=".45" strokeDasharray="3 11" opacity=".7"/>
-              <line x1="600" y1="130" x2="200" y2="370" stroke="#F1B497" strokeWidth=".45" strokeDasharray="3 11" opacity=".7"/>
-              {/* Spokes to centre */}
-              <line x1="400" y1="250" x2="200" y2="130" stroke="#818cf8" strokeWidth=".35" strokeDasharray="2 8" opacity=".6"/>
-              <line x1="400" y1="250" x2="600" y2="130" stroke="#818cf8" strokeWidth=".35" strokeDasharray="2 8" opacity=".6"/>
-              <line x1="400" y1="250" x2="200" y2="370" stroke="#818cf8" strokeWidth=".35" strokeDasharray="2 8" opacity=".6"/>
-              <line x1="400" y1="250" x2="600" y2="370" stroke="#818cf8" strokeWidth=".35" strokeDasharray="2 8" opacity=".6"/>
-              {/* Node circles */}
-              <circle cx="200" cy="130" r="5" fill="none" stroke="#818cf8" strokeWidth="1"/>
-              <circle cx="600" cy="130" r="5" fill="none" stroke="#818cf8" strokeWidth="1"/>
-              <circle cx="200" cy="370" r="5" fill="none" stroke="#818cf8" strokeWidth="1"/>
-              <circle cx="600" cy="370" r="5" fill="none" stroke="#818cf8" strokeWidth="1"/>
-              {/* Central hub */}
-              <circle cx="400" cy="250" r="10" fill="none" stroke="#F1B497" strokeWidth=".9" opacity=".85"/>
-              <circle cx="400" cy="250" r="4"  fill="#F1B497" opacity=".4"/>
-              <circle cx="400" cy="250" r="22" fill="none" stroke="#F1B497" strokeWidth=".4" strokeDasharray="2 6" opacity=".5"/>
-            </svg>
-
-            {/* Twinkling starfield */}
-            {MODAL_STARS.map(s => (
-              <div key={s.id} style={{
-                position:'absolute', left:`${s.left}%`, top:`${s.top}%`,
-                width:s.size, height:s.size, borderRadius:'50%', background:'#fff',
-                animation:`twinkle ${s.dur}s ease-in-out ${s.delay}s infinite`,
-              }} />
-            ))}
-          </div>
-
-          <ScanLine />
-
-          <div style={{ position:'relative', zIndex:1, display:'flex', flexDirection:'column', alignItems:'center', width:'100%' }}>
-            <div style={{ textAlign:'center', marginBottom:36 }}>
-              <p style={{ fontFamily:"'DM Mono',monospace", fontSize:10, letterSpacing:'2.5px', textTransform:'uppercase', color:'#8B8986', marginBottom:12 }}>Your Specialisation</p>
-              <h2 style={{ fontFamily:"'Hanken Grotesk',sans-serif", fontWeight:300, fontSize:'clamp(32px,5vw,56px)', letterSpacing:'-1.5px', color:'#F5EFEB', margin:0, animation:'fadeUp .45s ease .05s both' }}>
-                Choose Your Major.
-              </h2>
-              <p style={{ fontFamily:"'DM Mono',monospace", fontSize:10, color:'#8B8986', marginTop:12, animation:'fadeUp .4s ease .15s both' }}>
-                Applied from Year 2 onwards · saved to your profile
-              </p>
-            </div>
-            <NeuralOrbit savedMajor={savedMajor} onSelect={handleMajorSelect} />
-            <button onClick={() => setShowMajor(false)} style={{ marginTop:24, background:'none', border:'none', fontFamily:"'DM Mono',monospace", fontSize:10, color:'rgba(255,255,255,.3)', cursor:'pointer', letterSpacing:'1px', textTransform:'uppercase' }}>
-              Cancel
-            </button>
-          </div>
-        </div>
-      )}
-    </>
-  )
-}
-
 // ── Hero ─────────────────────────────────────────────────────
-function Hero({ selection, sgpa, courses, savedMajor, minors = [], onToggleMinor }) {
-  const isMajorSem = selection ? isMajorSemester(selection.semester) : false
-  const semMinors  = selection ? MINORS.filter(m => m.courses?.[selection.semester]?.length) : []
-  const majorData  = useMemo(() => {
-    if (!isMajorSem) return null
-    // The selection's divide is the major whose courses are on screen.
-    return MAJORS.find(x => x.id === selection.divide) ?? MAJORS.find(x => x.id === savedMajor?.id) ?? null
-  }, [isMajorSem, selection, savedMajor])
+const MINOR_COLOR = '#C9A0FF'
+
+function Hero({ selection, sgpa, courses, minorOn = false, onToggleMinor }) {
+  const isCommonSem = selection ? isCommonSemester(selection.semester) : false
+  const minorRows   = isCommonSem ? (MINOR_COURSES[selection.semester] ?? []) : []
 
   return (
     <div style={{ position:'relative', overflow:'hidden', background:'#090c15', minHeight:'48vh', display:'flex', alignItems:'flex-end' }}>
@@ -304,30 +122,21 @@ function Hero({ selection, sgpa, courses, savedMajor, minors = [], onToggleMinor
             RV University · SGPA Calculator
             {selection && (
               <span style={{ marginLeft:12, padding:'2px 8px', background:'rgba(241,180,151,.1)', color:'#F1B497' }}>
-                {selection.semester.toUpperCase()}{!isMajorSem && ` · ${selection.divide}`}
+                {selection.semester.toUpperCase()}{!isCommonSem && ` · ${selection.divide}`}
               </span>
             )}
-            {majorData && (
-              <span style={{ marginLeft:8, padding:'2px 8px', background:`${majorData.color}15`, color:majorData.color, border:`1px solid ${majorData.color}30` }}>
-                {majorData.label}
-              </span>
+            {minorRows.length > 0 && (
+              <button type="button" onClick={() => onToggleMinor?.()}
+                title={`${minorOn ? 'Remove' : 'Add'} the minor (${minorRows.map(c => c.courseCode).join(', ')})`}
+                aria-pressed={minorOn}
+                style={{ marginLeft:8, padding:'2px 8px', cursor:'pointer', font:'inherit', letterSpacing:'inherit', textTransform:'inherit',
+                  background: minorOn ? `${MINOR_COLOR}15` : 'transparent',
+                  color: minorOn ? MINOR_COLOR : 'rgba(255,255,255,.38)',
+                  border: `1px ${minorOn ? 'solid' : 'dashed'} ${minorOn ? MINOR_COLOR + '30' : 'rgba(255,255,255,.18)'}`,
+                  transition:'color .15s, border-color .15s, background .15s' }}>
+                {minorOn ? '◇ Minor' : '+ Minor'}
+              </button>
             )}
-            {isMajorSem && semMinors.map(m => {
-              const on = minors.includes(m.id)
-              const codes = m.courses[selection.semester].map(c => c.courseCode).join(', ')
-              return (
-                <button key={m.id} type="button" onClick={() => onToggleMinor?.(m.id)}
-                  title={on ? `Remove ${m.label} minor (${codes})` : `Add ${m.label} minor (${codes})`}
-                  aria-pressed={on}
-                  style={{ marginLeft:8, padding:'2px 8px', cursor:'pointer', font:'inherit', letterSpacing:'inherit', textTransform:'inherit',
-                    background: on ? `${m.color}15` : 'transparent',
-                    color: on ? m.color : 'rgba(255,255,255,.38)',
-                    border: `1px ${on ? 'solid' : 'dashed'} ${on ? m.color + '30' : 'rgba(255,255,255,.18)'}`,
-                    transition:'color .15s, border-color .15s, background .15s' }}>
-                  {on ? `${m.glyph} ${m.label} minor` : `+ ${m.label} minor`}
-                </button>
-              )
-            })}
           </p>
           <h1 style={{ fontFamily:"'Hanken Grotesk',sans-serif", fontWeight:300, fontSize:'clamp(48px,9vw,118px)', letterSpacing:'-3px', color:'#F5EFEB', lineHeight:0.92, margin:0 }}>
             <span style={{ display:'block', overflow:'hidden' }}><span style={{ display:'block', animation:'clipReveal .8s cubic-bezier(.76,0,.24,1) .2s both' }}>SGPA</span></span>
@@ -382,95 +191,65 @@ function FloatBtn({ onClick }) {
 // ── App ───────────────────────────────────────────────────────
 export default function App() {
   const toast = useToast()
-  const [selection,   setSelection]  = useState(() => normalizeSelection(loadSelection(), loadMajor()?.id))
-  const [minors,      setMinors]     = useState(() => resolveMinors())
+  const [selection,   setSelection]  = useState(() => normalizeSelection(loadSelection()))
+  const [minorOn,     setMinorOn]    = useState(() => resolveMinorOn())
   // allCourses includes inactive minor courses (kept for their marks); everything on screen uses `courses`.
   const [allCourses,  setCourses]    = useState(() => {
     if (!selection) return []
-    return loadSemesterCourses(selection.semester, selection.divide, minors)
+    return loadSemesterCourses(selection.semester, selection.divide, minorOn)
   })
   const courses = useMemo(() => activeCourses(allCourses), [allCourses])
   const [activeTab,   setActiveTab]  = useState('courses')
   const [switchOpen,  setSwitchOpen] = useState(false)
-  // The saved major always follows the major on screen.
-  const [savedMajor,  setSavedMajor] = useState(() =>
-    selection && isMajorSemester(selection.semester) ? { id: selection.divide } : loadMajor())
 
-  // Keep storage in step with a repaired selection and the on-screen major (writes stay out of render).
+  // Keep storage in step with a repaired selection (writes stay out of render).
   useEffect(() => {
     if (JSON.stringify(loadSelection()) !== JSON.stringify(selection)) saveSelection(selection)
-    if (selection && isMajorSemester(selection.semester) && loadMajor()?.id !== selection.divide) saveMajor({ id: selection.divide })
   }, [selection])
 
   useEffect(() => {
     if (selection) saveSemesterCourses(selection.semester, selection.divide, allCourses)
   }, [allCourses, selection])
 
-  // Persist the minor choice (also makes an inferred choice explicit) and flag or
+  // Persist the minor switch (also makes an inferred value explicit) and flag or
   // unflag minor courses. Nothing is deleted, so marks survive an off and on cycle.
-  useEffect(() => { saveMinors(minors) }, [minors])
+  useEffect(() => { saveMinorOn(minorOn) }, [minorOn])
   useEffect(() => {
-    if (selection && isMajorSemester(selection.semester)) {
-      setCourses(prev => syncMinorCourses(prev, selection.semester, minors, blankCourse))
+    if (selection && isCommonSemester(selection.semester)) {
+      setCourses(prev => syncMinorCourses(prev, selection.semester, minorOn, blankCourse))
     }
-  }, [minors, selection])
+  }, [minorOn, selection])
 
   const handleSelect = useCallback((semester, divide) => {
-    // Major semesters have no EEX/ES split: the divide is the chosen major.
-    if (isMajorSemester(semester)) {
-      const majorId = loadMajor()?.id
-      if (!isMajorId(majorId)) return // the planet card asks for a major first
-      divide = majorId
-    }
-    const sel = { semester, divide }
+    // Common semesters have one list for every student: no divide.
+    const sel = isCommonSemester(semester) ? { semester } : { semester, divide }
     saveSelection(sel)
     setSelection(sel)
-    setCourses(loadSemesterCourses(semester, divide, minors))
+    setCourses(loadSemesterCourses(sel.semester, sel.divide, minorOn))
     setSwitchOpen(false)
     setActiveTab('courses')
-  }, [minors])
+  }, [minorOn])
 
-  // Changing major while a major semester is open switches the page to that major
-  // (core and minor marks are shared, only the specialization course changes).
-  const handleMajorChange = useCallback((major) => {
-    saveMajor({ id: major.id })
-    setSavedMajor({ id: major.id })
-    if (selection && isMajorSemester(selection.semester) && selection.divide !== major.id && isMajorId(major.id)) {
-      const sel = { semester: selection.semester, divide: major.id }
-      saveSelection(sel)
-      setSelection(sel)
-      setCourses(loadSemesterCourses(sel.semester, sel.divide, minors))
-    }
-  }, [selection, minors])
-
-  const toggleMinor = useCallback((minorId) => {
-    setMinors(prev => prev.includes(minorId) ? prev.filter(id => id !== minorId) : [...prev, minorId])
-  }, [])
+  const toggleMinor = useCallback(() => setMinorOn(prev => !prev), [])
 
   const updateCourse = useCallback((id, patch) => {
     setCourses(prev => prev.map(c => c.id === id ? enrichCourse({ ...c, ...patch }) : c))
   }, [])
 
-  // Major semesters: another major's specialization course typed or imported here is
-  // stored under that major (side effects run here, outside any state updater) ...
-  const routeIncoming = useCallback((list) => {
-    if (!selection || !isMajorSemester(selection.semester)) return list
-    const { kept, routed } = routeForeignMajorCourses(selection.semester, selection.divide, list)
-    for (const r of routed) {
-      toast?.(`${r.course.courseCode} is the ${MAJORS.find(m => m.id === r.majorId)?.label} course, saved under that major`, 'info')
+  // Common semesters: a minor course typed or imported while the minor is off gets a
+  // hint (side effects run here, outside any state updater) ...
+  const minorHint = useCallback((list) => {
+    if (!selection || !isCommonSemester(selection.semester) || minorOn) return
+    for (const c of list) {
+      if (isMinorCode(selection.semester, c.courseCode)) toast?.(`${c.courseCode} is a minor course; switch the minor on to count it`, 'info')
     }
-    for (const c of kept) {
-      const minor = MINORS.find(m => (m.courses?.[selection.semester] ?? []).some(x => x.courseCode === c.courseCode))
-      if (minor && !minors.includes(minor.id)) toast?.(`${c.courseCode} is a ${minor.label} minor course; switch the minor on to count it`, 'info')
-    }
-    return kept
-  }, [selection, minors, toast])
+  }, [selection, minorOn, toast])
 
   // ... and the list is then made consistent: one row per code, minor rows following the switch. Pure.
   const fitToSemester = useCallback((list) => {
-    if (!selection || !isMajorSemester(selection.semester)) return list
-    return syncMinorCourses(dedupeByCode(list), selection.semester, minors, blankCourse)
-  }, [selection, minors])
+    if (!selection || !isCommonSemester(selection.semester)) return list
+    return syncMinorCourses(dedupeByCode(list), selection.semester, minorOn, blankCourse)
+  }, [selection, minorOn])
 
   const addCourse = useCallback((data) => {
     const course = enrichCourse({
@@ -480,10 +259,9 @@ export default function App() {
       cie3Marks: data.cie3Marks ?? null, seeMarks:  data.seeMarks  ?? null,
       totalMarks: null, grade: null, gradePoint: null, creditGradeProduct: null,
     })
-    const kept = routeIncoming([course])
-    if (kept.length) setCourses(prev => fitToSemester([...prev, ...kept]))
-    return kept.length > 0
-  }, [routeIncoming, fitToSemester])
+    minorHint([course])
+    setCourses(prev => fitToSemester([...prev, course]))
+  }, [minorHint, fitToSemester])
 
   const deleteCourse = useCallback((id) => {
     setCourses(prev => prev.filter(c => c.id !== id))
@@ -496,32 +274,29 @@ export default function App() {
       cie1Marks: null, cie2Marks: null, cie3Marks: null, seeMarks: null,
       totalMarks: null, grade: null, gradePoint: null, creditGradeProduct: null,
     }))
-    const kept = routeIncoming(imported)
+    minorHint(imported)
     // Keep switched-off minor courses (and their marks) unless the import replaces them,
     // then apply the minor switch to the result so imported minor rows match it.
-    setCourses(prev => fitToSemester([...kept, ...prev.filter(c => c.inactive && !kept.some(n => n.courseCode === c.courseCode))]))
-  }, [routeIncoming, fitToSemester])
+    setCourses(prev => fitToSemester([...imported, ...prev.filter(c => c.inactive && !imported.some(n => n.courseCode === c.courseCode))]))
+  }, [minorHint, fitToSemester])
 
   const resetAll = useCallback(() => {
     if (!selection) return
-    // Template follows the selection on screen (selection.divide), not a separately saved major.
     clearSemesterCourses(selection.semester, selection.divide)
-    setCourses(makeCoursesFromTemplate(courseTemplate(selection.semester, selection.divide, minors)))
-  }, [selection, minors])
+    setCourses(makeCoursesFromTemplate(courseTemplate(selection.semester, selection.divide, minorOn)))
+  }, [selection, minorOn])
 
-  // The major on screen: the open major semester's divide, else the saved major.
-  const activeMajor  = selection && isMajorSemester(selection.semester) ? { id: selection.divide } : savedMajor
   const sgpa         = calculateSGPA(courses)
   const scored       = courses.filter(c => c.creditGradeProduct !== null)
   const totalCredits = scored.reduce((s, c) => s + (Number(c.credits) || 0), 0)
   const totalCGP     = scored.reduce((s, c) => s + c.creditGradeProduct, 0)
   const isCompleted  = SEMESTERS.find(s => s.id === selection?.semester)?.completed ?? false
   const isComingSoon = SEMESTERS.find(s => s.id === selection?.semester)?.comingSoon ?? false
-  const cgpaData     = useCGPA(courses, selection, savedMajor?.id, minors)
+  const cgpaData     = useCGPA(courses, selection, minorOn)
 
   // No selection — show full-screen space selector
   if (!selection && !switchOpen) {
-    return <SelectionScreen onSelect={handleSelect} savedMajor={activeMajor} onMajorChange={handleMajorChange} minors={minors} onToggleMinor={toggleMinor} />
+    return <SpaceSelectionScreen onSelect={handleSelect} minorOn={minorOn} onToggleMinor={toggleMinor} />
   }
 
   // Switch overlay
@@ -534,7 +309,7 @@ export default function App() {
         exit={{ opacity:0 }}
         transition={{ duration:.25 }}
       >
-        <SelectionScreen onSelect={handleSelect} onClose={() => setSwitchOpen(false)} savedMajor={activeMajor} onMajorChange={handleMajorChange} minors={minors} onToggleMinor={toggleMinor} />
+        <SpaceSelectionScreen onSelect={handleSelect} onClose={() => setSwitchOpen(false)} minorOn={minorOn} onToggleMinor={toggleMinor} />
       </motion.div>
     )
   }
@@ -544,7 +319,7 @@ export default function App() {
       <Header activeTab={activeTab} setActiveTab={setActiveTab} selection={selection} sgpa={sgpa} onSwitch={() => setSwitchOpen(true)} />
 
       {activeTab === 'courses' && (
-        <Hero selection={selection} sgpa={sgpa} courses={courses} savedMajor={savedMajor} minors={minors} onToggleMinor={toggleMinor} />
+        <Hero selection={selection} sgpa={sgpa} courses={courses} minorOn={minorOn} onToggleMinor={toggleMinor} />
       )}
 
       {activeTab !== 'courses' && (

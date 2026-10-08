@@ -1,68 +1,37 @@
 // Pure helpers that decide which course template a semester starts with.
 // No React, no localStorage, so they can also run in plain Node (see scripts/check-sem3.mjs).
 // Imports carry the .js extension for that reason; Vite resolves them the same way.
-import { SEMESTERS, DIVIDES, MAJORS, MAJOR_SEMESTERS, SEM3_CORE_COURSES, MINORS, EEX_COURSES } from './constants.js'
+import { SEMESTERS, DIVIDES, SEM3_CORE_COURSES, MINOR_COURSES, EEX_COURSES } from './constants.js'
 import { enrichCourse } from './calculations.js'
 
-export function isMajorSemester(semester) {
-  return SEMESTERS.find(s => s.id === semester)?.majorSem ?? false
+// Year 2 onwards: one course list for every student, no EEX/ES divide.
+export function isCommonSemester(semester) {
+  return SEMESTERS.find(s => s.id === semester)?.common ?? false
 }
 
-export function isMajorId(id) {
-  return MAJORS.some(m => m.id === id)
+// The semester's minor courses when the minor is on, otherwise none.
+export function minorCoursesFor(semester, minorOn = false) {
+  return minorOn ? (MINOR_COURSES[semester] ?? []) : []
 }
 
-// Courses for every selected minor in a given semester (unknown ids are ignored).
-export function minorCoursesFor(semester, minorIds = []) {
-  return MINORS
-    .filter(m => minorIds.includes(m.id))
-    .flatMap(m => m.courses?.[semester] ?? [])
+// Whether a course code is one of the semester's minor courses.
+export function isMinorCode(semester, courseCode) {
+  return (MINOR_COURSES[semester] ?? []).some(c => c.courseCode === courseCode)
 }
 
-// Which minor (if any) a course code belongs to in this semester.
-export function minorIdForCode(semester, courseCode) {
-  return MINORS.find(m => (m.courses?.[semester] ?? []).some(c => c.courseCode === courseCode))?.id ?? null
-}
-
-// Course codes of the specialization course(s) for one major in one semester.
-export function majorCourseCodes(semester, majorId) {
-  return new Set((MAJOR_SEMESTERS[semester]?.[majorId] ?? []).map(c => c.courseCode))
-}
-
-// Which major a specialization course code belongs to (CS2227 is aiml, ...), or null.
-export function majorIdForCode(semester, courseCode) {
-  return MAJORS.find(m => majorCourseCodes(semester, m.id).has(courseCode))?.id ?? null
-}
-
-// Sem 3 = shared core + the major's specialization course + selected minors.
-// The specialization course sits after Computer Networks to mirror the timetable order.
-export function buildSem3Courses(majorId, minorIds = []) {
-  const major = MAJOR_SEMESTERS.sem3?.[majorId] ?? []
-  const [calc, daa, cn, ...rest] = SEM3_CORE_COURSES
-  return [calc, daa, cn, ...major, ...rest, ...minorCoursesFor('sem3', minorIds)]
+// Sem 3 = common core (major course and University Elective included) + the minor courses when on.
+export function buildSem3Courses(minorOn = false) {
+  return [...SEM3_CORE_COURSES, ...minorCoursesFor('sem3', minorOn)]
 }
 
 // Single source of truth for the starting course list of any selection.
-// divide: 'EEX' | 'ES' for sem 1/2; for major semesters it is the major id
-// shown on screen (selection.divide), never a separately saved major.
-export function courseTemplate(semester, divide, minorIds = []) {
+// divide: 'EEX' | 'ES' for sem 1/2; ignored for common semesters.
+export function courseTemplate(semester, divide, minorOn = false) {
   const divideData = DIVIDES[semester]?.find(d => d.id === divide)
   if (divideData) return divideData.courses
-  if (semester === 'sem3') return buildSem3Courses(divide, minorIds)
-  return MAJOR_SEMESTERS[semester]?.[divide] ?? EEX_COURSES
-}
-
-// Major semesters store their courses in parts: every specialization course goes to
-// its own major (whichever major's screen it was typed or imported on), and everything
-// else (core, minors, custom courses) is shared by all majors.
-export function splitMajorCourses(courses, semester) {
-  const shared = [], byMajor = {}
-  for (const c of courses) {
-    const owner = majorIdForCode(semester, c.courseCode)
-    if (owner) (byMajor[owner] ??= []).push(c)
-    else shared.push(c)
-  }
-  return { shared, byMajor }
+  if (semester === 'sem3') return buildSem3Courses(minorOn)
+  if (isCommonSemester(semester)) return [] // later semesters have no course data yet
+  return EEX_COURSES
 }
 
 // How many assessments are filled in (the four marks, or a direct grade).
@@ -105,28 +74,19 @@ export function dedupeByCode(courses) {
   return mergeByCode([], courses, false)
 }
 
-// Inverse of splitMajorCourses for one major: its course goes back after CS2403
-// (or after the third course when the list has been edited).
-export function mergeMajorCourses(shared, major) {
-  const cn = shared.findIndex(c => c.courseCode === 'CS2403')
-  const at = cn >= 0 ? cn + 1 : Math.min(3, shared.length)
-  return dedupeByCode([...shared.slice(0, at), ...major, ...shared.slice(at)])
-}
-
 export function hasMarks(c) {
   return filledCount(c) > 0
 }
 
-// Bring a course list in line with the selected minors. This never deletes:
-// courses of a minor that is switched off are kept with inactive: true (marks intact,
-// excluded from SGPA/CGPA); switching it back on clears the flag. Missing courses of
-// a selected minor are added through makeCourse. Returns the same array when nothing changes.
-export function syncMinorCourses(courses, semester, minorIds = [], makeCourse = c => c) {
+// Bring a course list in line with the minor switch. This never deletes: minor
+// courses are kept with inactive: true while the minor is off (marks intact, excluded
+// from SGPA/CGPA); switching it back on clears the flag. Missing minor courses are
+// added through makeCourse when it is on. Returns the same array when nothing changes.
+export function syncMinorCourses(courses, semester, minorOn = false, makeCourse = c => c) {
   let changed = false
   const out = courses.map(c => {
-    const owner = minorIdForCode(semester, c.courseCode)
-    if (!owner) return c
-    const inactive = !minorIds.includes(owner)
+    if (!isMinorCode(semester, c.courseCode)) return c
+    const inactive = !minorOn
     if (!!c.inactive === inactive) return c
     changed = true
     if (inactive) return { ...c, inactive: true }
@@ -135,32 +95,22 @@ export function syncMinorCourses(courses, semester, minorIds = [], makeCourse = 
     return rest
   })
   const have = new Set(out.map(c => c.courseCode))
-  const added = minorCoursesFor(semester, minorIds).filter(c => !have.has(c.courseCode)).map(makeCourse)
+  const added = minorCoursesFor(semester, minorOn).filter(c => !have.has(c.courseCode)).map(makeCourse)
   if (added.length) changed = true
   return changed ? [...out, ...added] : courses
 }
 
-// Validate a stored minors setting. Returns a clean array of known ids ([] is an
-// explicit off), or null when the value is missing or malformed: not an array, or any
-// entry that is not a known minor id (case-insensitive). The caller decides the fallback.
-export function normalizeMinors(value) {
-  if (!Array.isArray(value)) return null
-  const ids = value.map(v => (typeof v === 'string' ? v.trim().toLowerCase() : null))
-  if (!ids.every(v => MINORS.some(m => m.id === v))) return null
-  return [...new Set(ids)]
+// Validate a stored minor setting: true or false, otherwise null (missing or
+// malformed). The caller decides the fallback.
+export function normalizeMinorSetting(value) {
+  return typeof value === 'boolean' ? value : null
 }
 
-// Fallback when the minors setting is absent or malformed: a minor counts as on
+// Fallback when the minor setting is absent or malformed: the minor counts as on
 // when any of its courses in the given lists already has marks.
-export function inferMinors(courseLists) {
-  const on = new Set()
-  for (const [semester, courses] of courseLists) {
-    for (const c of courses ?? []) {
-      const owner = minorIdForCode(semester, c?.courseCode)
-      if (owner && hasMarks(c)) on.add(owner)
-    }
-  }
-  return [...on]
+export function inferMinorOn(courseLists) {
+  return courseLists.some(([semester, courses]) =>
+    (courses ?? []).some(c => isMinorCode(semester, c?.courseCode) && hasMarks(c)))
 }
 
 export function activeCourses(courses) {

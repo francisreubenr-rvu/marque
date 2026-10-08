@@ -1,60 +1,70 @@
-// Sanity checks for Sem 3 credits and storage, using the app's own data and helpers.
+// Sanity checks for Sem 3 credits and storage migrations, using the app's own data and helpers.
 // Run: npm run check:sem3 (also runs before the GitHub Pages build in predeploy).
 import assert from 'node:assert/strict'
 
-// Minimal in-memory localStorage so the storage helpers run in Node.
+// Minimal in-memory localStorage so the storage helpers run in Node. failWrite(key) can
+// make setItem throw (like a full storage) to test that migrations retry.
 const mem = new Map()
+let failWrite = () => false
 globalThis.localStorage = {
   getItem: k => (mem.has(k) ? mem.get(k) : null),
-  setItem: (k, v) => mem.set(k, String(v)),
+  setItem: (k, v) => { if (failWrite(k)) throw new Error('QuotaExceededError'); mem.set(k, String(v)) },
   removeItem: k => mem.delete(k),
   clear: () => mem.clear(),
 }
+const snapshot = () => JSON.stringify([...mem.entries()].sort())
+const reset = () => { mem.clear(); failWrite = () => false }
 
-const { buildSem3Courses, courseTemplate, totalCredits, syncMinorCourses, activeCourses, mergeByCode, minorIdForCode, majorIdForCode, splitMajorCourses } = await import('../src/utils/semesterTemplates.js')
-const { MAJORS, SEM3_UNIVERSITY_ELECTIVE } = await import('../src/utils/constants.js')
+const { buildSem3Courses, courseTemplate, totalCredits, syncMinorCourses, activeCourses, mergeByCode, isMinorCode } = await import('../src/utils/semesterTemplates.js')
+const { SEM3_UNIVERSITY_ELECTIVE, SEM3_MAJOR_COURSE, MINOR_COURSES, SEM3_CORE_COURSES } = await import('../src/utils/constants.js')
 const { calculateSGPA, enrichCourse } = await import('../src/utils/calculations.js')
 const store = await import('../src/utils/semesterStore.js')
 
+const SHARED = 'sgpa_calc_v2_sem3_shared'
+const MINOR = 'sgpa_minor_v2'
+const FLAG = store.LS_GENERIC_SLOTS_MIGRATED
+const BK = store.BACKUP_SUFFIX_V3
 const fmt = cs => cs.map(c => `${c.courseCode}(${c.credits})`).join(' + ')
-// Core and major courses 87 (A+, 9); minor courses 55 (B, 6), so the minor visibly moves SGPA.
-const mark = c => enrichCourse(c.courseCode.startsWith('LW')
+const codes = cs => cs.map(c => c.courseCode)
+const MARK_KEYS = ['id', 'cie1Marks', 'cie2Marks', 'cie3Marks', 'seeMarks', 'totalMarks', 'grade', 'gradePoint', 'creditGradeProduct', 'credits', 'inactive', 'difficulty']
+const marksOf = c => MARK_KEYS.map(k => c[k] ?? null)
+const marked = cs => cs.filter(c => c.totalMarks !== null && c.totalMarks !== undefined).length
+// Core courses 87 (A+, 9); minor courses 55 (B, 6), so the minor visibly moves SGPA.
+const mark = c => enrichCourse(isMinorCode('sem3', c.courseCode) || c.courseCode.startsWith('LW')
   ? { ...c, cie1Marks: 10, cie2Marks: 15, cie3Marks: 15, seeMarks: 15 }
   : { ...c, cie1Marks: 18, cie2Marks: 22, cie3Marks: 22, seeMarks: 25 })
-const marked = cs => cs.filter(c => c.totalMarks !== null && c.totalMarks !== undefined).length
-
-// 1. Credit totals
-const dsCrim = buildSem3Courses('ds', ['crim'])
-const dsOnly = buildSem3Courses('ds', [])
-console.log(`Data Science + Criminology: ${fmt(dsCrim)} = ${totalCredits(dsCrim)} credits`)
-console.log(`Data Science, no minor:     ${fmt(dsOnly)} = ${totalCredits(dsOnly)} credits`)
+// Distinct marks per row so a row swap would change the SGPA.
+// Totals 45 + 4 * (i % 10), all within the caps.
+const varied = (c, i) => enrichCourse({ ...c, cie1Marks: 8 + (i % 10), cie2Marks: 12 + (i % 10), cie3Marks: 11 + (i % 10), seeMarks: 14 + (i % 10), difficulty: i % 2 ? 'hard' : 'easy' })
+const row = (courseCode, courseName, credits) => store.blankCourse({ courseCode, courseName, credits })
 const UE = SEM3_UNIVERSITY_ELECTIVE.courseCode
+
+// 1. Credit totals and generic rows
+const withMinor = buildSem3Courses(true)
+const noMinor = buildSem3Courses(false)
+console.log(`Sem 3 with minor:    ${fmt(withMinor)} = ${totalCredits(withMinor)} credits`)
+console.log(`Sem 3 without minor: ${fmt(noMinor)} = ${totalCredits(noMinor)} credits`)
+assert.deepEqual(codes(withMinor), ['CS2806', 'CS2000', 'CS2403', 'CS2404', 'EE', 'MAJOR', 'UE', 'MINOR1', 'MINOR2'])
+assert.equal(withMinor.length, 9)
+assert.equal(totalCredits(withMinor), 25)
+assert.equal(noMinor.length, 7)
+assert.equal(totalCredits(noMinor), 19)
+assert.equal(SEM3_MAJOR_COURSE.credits, 3)
 assert.equal(SEM3_UNIVERSITY_ELECTIVE.credits, 2)
-assert.equal(totalCredits(dsCrim), 25)
-assert.equal(dsCrim.length, 9)
-assert.equal(totalCredits(dsOnly), 19)
-assert.equal(dsOnly.length, 7)
-assert.deepEqual(dsCrim.map(c => c.courseCode), ['CS2806', 'CS2000', 'CS2403', 'CS2231', 'CS2404', 'EE', UE, 'LW2055', 'LW2032'])
-for (const m of MAJORS) {
-  const cs = courseTemplate('sem3', m.id, [])
-  console.log(`${m.label.padEnd(16)} ${cs.length} courses, ${totalCredits(cs)} credits`)
-  assert.equal(cs.length, 7)
-  assert.equal(totalCredits(cs), 19)
-  assert.ok(cs.some(c => c.courseCode === UE), `${m.id} has the University Elective`)
-}
-// The elective is a shared core course: not a minor code, not a specialization code.
-assert.equal(minorIdForCode('sem3', UE), null)
-assert.equal(majorIdForCode('sem3', UE), null)
-assert.ok(splitMajorCourses(dsCrim, 'sem3').shared.some(c => c.courseCode === UE))
-console.log(`University Elective ${UE} (${SEM3_UNIVERSITY_ELECTIVE.credits} cr): shared core for every major, not a minor or major code`)
+assert.deepEqual(MINOR_COURSES.sem3.map(c => c.credits), [3, 3])
+assert.deepEqual(codes(courseTemplate('sem3', 'ds', true)), codes(withMinor), 'no per-major template')
+for (const c of withMinor) assert.ok(!/^(LW|CS22|CS25|CS2405)/.test(c.courseCode), `generic row ${c.courseCode}`)
+assert.deepEqual(courseTemplate('sem4'), [], 'locked semesters have no course data')
+console.log('Generic rows: MAJOR 3 cr, UE 2 cr, MINOR1/MINOR2 3 cr each; no per-major template')
 
 // 2. Minor off and on again keeps all 9 marks; off excludes the minor from SGPA.
-let cur = store.loadSemesterCourses('sem3', 'ds', ['crim']).map(mark)
-const off = syncMinorCourses(cur, 'sem3', [], store.blankCourse)
+reset()
+const cur = store.loadSemesterCourses('sem3', undefined, true).map(mark)
+const off = syncMinorCourses(cur, 'sem3', false, store.blankCourse)
 assert.equal(off.length, 9, 'minor courses are kept when switched off')
 assert.equal(totalCredits(activeCourses(off)), 19)
 assert.equal(marked(off), 9)
-const on = syncMinorCourses(off, 'sem3', ['crim'], store.blankCourse)
+const on = syncMinorCourses(off, 'sem3', true, store.blankCourse)
 assert.equal(totalCredits(activeCourses(on)), 25)
 assert.equal(marked(on), 9)
 assert.equal(calculateSGPA(off), 9)
@@ -62,131 +72,211 @@ assert.equal(calculateSGPA(on).toFixed(4), (207 / 25).toFixed(4))
 console.log(`Minor off/on cycle: ${marked(on)} of ${on.length} marks kept, SGPA off ${calculateSGPA(off).toFixed(4)} (19 cr), on ${calculateSGPA(on).toFixed(4)} (25 cr)`)
 
 // 3. Off state survives a save and reload, marks intact.
-store.saveSemesterCourses('sem3', 'ds', off)
-const reloaded = store.loadSemesterCourses('sem3', 'ds', [])
+store.saveSemesterCourses('sem3', undefined, off)
+const reloaded = store.loadSemesterCourses('sem3', undefined, false)
 assert.equal(marked(reloaded), 9)
 assert.equal(totalCredits(activeCourses(reloaded)), 19)
 
-// 4. Missing or malformed minors setting with saved minor marks: inferred as on, nothing dropped.
-store.saveSemesterCourses('sem3', 'ds', on)
-for (const v of [null, '{oops', '"crim"', '42']) {
-  if (v === null) localStorage.removeItem('sgpa_minors_v1'); else localStorage.setItem('sgpa_minors_v1', v)
-  const minors = store.resolveMinors()
-  assert.deepEqual(minors, ['crim'], `setting ${v}`)
-  assert.equal(marked(store.loadSemesterCourses('sem3', 'ds', minors)), 9)
+// 4. Minor switch setting: explicit values win; missing or malformed falls back to marks.
+store.saveSemesterCourses('sem3', undefined, on)
+for (const v of [null, '{oops', '"yes"', '42', '["crim"]']) {
+  if (v === null) localStorage.removeItem(MINOR); else localStorage.setItem(MINOR, v)
+  assert.equal(store.resolveMinorOn(), true, `setting ${v} with minor marks`)
 }
-localStorage.setItem('sgpa_minors_v1', '["CRIM"]')
-assert.deepEqual(store.resolveMinors(), ['crim'])
-console.log('Minors setting missing/malformed with marks present: treated as on, 9 of 9 marks kept')
+localStorage.setItem(MINOR, 'false')
+assert.equal(store.resolveMinorOn(), false)
+localStorage.setItem(MINOR, 'true')
+store.saveSemesterCourses('sem3', undefined, store.loadSemesterCourses('sem3', undefined, false).filter(c => !isMinorCode('sem3', c.courseCode)))
+localStorage.removeItem(MINOR)
+assert.equal(store.resolveMinorOn(), false, 'no setting and no minor marks: off')
+console.log('Minor switch: true/false kept; missing or malformed with minor marks reads as on')
 
-// 5. Switching major keeps core (elective included) and minor marks; only the specialization course changes.
-const ai = store.loadSemesterCourses('sem3', 'aiml', ['crim'])
-assert.equal(ai.find(c => c.courseCode === 'CS2227').totalMarks, null)
-assert.equal(marked(ai), 8)
-assert.equal(ai.find(c => c.courseCode === UE).totalMarks, 87, 'elective marks follow the major switch')
-assert.ok(!ai.some(c => c.courseCode === 'CS2231'))
-store.saveSemesterCourses('sem3', 'aiml', ai)
-assert.equal(marked(store.loadSemesterCourses('sem3', 'ds', ['crim'])), 9)
-console.log('Switch ds -> aiml: 8 shared marks kept incl. the elective (CS2227 blank); back to ds: 9 of 9')
+// 5. Selections: Sem 3 carries no divide, locked semesters drop, Sem 1/2 pass through.
+assert.deepEqual(store.normalizeSelection({ semester: 'sem3', divide: 'ds' }), { semester: 'sem3' })
+assert.deepEqual(store.normalizeSelection({ semester: 'sem3' }), { semester: 'sem3' })
+assert.equal(store.normalizeSelection({ semester: 'sem4', divide: 'ds' }), null)
+assert.deepEqual(store.normalizeSelection({ semester: 'sem1', divide: 'ES' }), { semester: 'sem1', divide: 'ES' })
+assert.equal(store.normalizeSelection('junk'), null)
 
-// 6. Reset follows the on-screen major.
-assert.ok(courseTemplate('sem3', 'ds', []).some(c => c.courseCode === 'CS2231'))
-assert.ok(!courseTemplate('sem3', 'ds', []).some(c => c.courseCode === 'CS2227'))
-
-// 7. Migration from the first branch layout (whole list per major) loses nothing.
-mem.clear()
-localStorage.setItem('sgpa_calc_v2_sem3_ds', JSON.stringify(buildSem3Courses('ds', ['crim']).map(store.blankCourse).map(mark)))
-localStorage.setItem('sgpa_calc_v2_sem3_aiml', JSON.stringify(buildSem3Courses('aiml', []).map(store.blankCourse)))
-store.migrateMajorSemesterStorage()
-assert.equal(localStorage.getItem('sgpa_calc_v2_sem3_ds'), null)
-assert.ok(localStorage.getItem('sgpa_calc_v2_sem3_ds_premigration'))
-assert.equal(marked(store.loadSemesterCourses('sem3', 'ds', store.resolveMinors())), 9)
-assert.equal(marked(store.loadSemesterCourses('sem3', 'aiml', ['crim'])), 8)
-console.log('Migration of old per-major lists: 9 of 9 marks kept, backups under *_premigration')
-
-// 8. Explicit off ([]) survives a reload: no inference, minor rows stay off with marks.
-mem.clear()
-store.saveSemesterCourses('sem3', 'ds', syncMinorCourses(store.loadSemesterCourses('sem3', 'ds', ['crim']).map(mark), 'sem3', [], store.blankCourse))
-localStorage.setItem('sgpa_minors_v1', '[]')
-assert.deepEqual(store.resolveMinors(), [])
-const offReload = store.loadSemesterCourses('sem3', 'ds', store.resolveMinors())
-assert.equal(totalCredits(activeCourses(offReload)), 19)
-assert.equal(marked(offReload), 9)
-for (const bad of ['["zzz"]', '[1]', '["crim","zzz"]']) {
-  localStorage.setItem('sgpa_minors_v1', bad)
-  assert.deepEqual(store.resolveMinors(), ['crim'], `malformed ${bad} falls back to inference`)
+// Format deployed at 1d0510d: shared list (core, UE, named minor, custom) plus the
+// per-major specialization keys, the saved major and the named minor setting.
+const DEPLOYED_SHARED = () => [
+  ['CS2806', 'Calculus', 2], ['CS2000', 'Design and Analysis of Algorithms', 4], ['CS2403', 'Computer Networks', 3],
+  ['CS2404', 'Internet of Things', 3], ['EE', 'Environment Education', 2], ['UE', 'University Elective', 2],
+  ['LW2055', 'Old minor course A', 3], ['LW2032', 'Old minor course B', 3], ['MY101', 'Custom course', 1],
+].map(([c, n, cr], i) => varied(row(c, n, cr), i))
+function seedDeployed({ major = 'ds', minors = '["crim"]', shared = DEPLOYED_SHARED(), selection = { semester: 'sem3', divide: major } } = {}) {
+  reset()
+  localStorage.setItem('sgpa_major_v1', JSON.stringify({ id: major }))
+  if (selection) localStorage.setItem('sgpa_selection_v1', JSON.stringify(selection))
+  if (minors !== null) localStorage.setItem('sgpa_minors_v1', minors)
+  localStorage.setItem(store.LS_MAJOR_SEM_MIGRATED, '2026-10-07T00:00:00.000Z')
+  localStorage.setItem(store.LS_CORE_ADDED, '["sem3:UE"]')
+  localStorage.setItem(SHARED, JSON.stringify(shared))
+  const majors = { ds: varied(row('CS2231', 'Data Science', 3), 9), aiml: varied(row('CS2227', 'Artificial Intelligence and Machine Learning', 3), 1),
+    cyber: varied(row('CS2405', 'Cyber Security', 3), 5), cloud: row('CS2500', 'Cloud Computing and Big Data', 3) }
+  for (const [m, c] of Object.entries(majors)) localStorage.setItem(`sgpa_calc_v2_sem3_major_${m}`, JSON.stringify([c]))
+  return { shared, majors }
 }
-console.log('Explicit off reloads as off (19 cr, 9 of 9 marks); ["zzz"], [1] are malformed and fall back to inference')
+// What the 1d0510d app counted: the shared list plus the selected major's course, minor rows per the switch.
+const oldSgpa = (shared, majorCourse, minorOn) => calculateSGPA([...shared, majorCourse].map(c =>
+  (c.courseCode.startsWith('LW') ? { ...c, inactive: !minorOn } : c)))
 
-// 9. Conflicting old lists: per course, more assessments filled wins; a tie goes to the last saved major.
-mem.clear()
-const oldList = (major, fill) => JSON.stringify(buildSem3Courses(major, []).map(store.blankCourse).map(fill))
-const cie1Only = c => enrichCourse({ ...c, cie1Marks: 12 })
-const full60 = c => enrichCourse({ ...c, cie1Marks: 12, cie2Marks: 15, cie3Marks: 15, seeMarks: 18 })
-localStorage.setItem('sgpa_major_v1', JSON.stringify({ id: 'ds' }))
-// ds: CIE1 only on every course; aiml: full marks on CS2806 only
-localStorage.setItem('sgpa_calc_v2_sem3_ds', oldList('ds', cie1Only))
-localStorage.setItem('sgpa_calc_v2_sem3_aiml', oldList('aiml', c => (c.courseCode === 'CS2806' ? full60(c) : c)))
-store.migrateMajorSemesterStorage()
-let v = store.loadSemesterCourses('sem3', 'ds', [])
-assert.equal(v.find(c => c.courseCode === 'CS2806').totalMarks, 60, 'fully marked copy beats CIE1-only copy')
-assert.equal(v.find(c => c.courseCode === 'CS2000').cie1Marks, 12, 'CIE1 kept where the other list is blank')
-// tie: both full, different values; last saved major (ds) wins
-mem.clear()
-localStorage.setItem('sgpa_major_v1', JSON.stringify({ id: 'ds' }))
-localStorage.setItem('sgpa_calc_v2_sem3_aiml', oldList('aiml', full60))
-localStorage.setItem('sgpa_calc_v2_sem3_ds', oldList('ds', mark))
-store.migrateMajorSemesterStorage()
-v = store.loadSemesterCourses('sem3', 'aiml', [])
-assert.equal(v.find(c => c.courseCode === 'CS2806').totalMarks, 87, 'tie goes to the last saved major (ds)')
-assert.equal(v.find(c => c.courseCode === 'CS2227').totalMarks, 60, 'aiml keeps its own course')
-assert.ok(localStorage.getItem(store.LS_MAJOR_SEM_MIGRATED))
-console.log('Conflicting old lists: merged per course (more filled wins, tie to last saved major ds)')
+// 6. Upgrade from 1d0510d with marks on every row: identical marks and SGPA.
+{
+  const seed = seedDeployed()
+  const before = oldSgpa(seed.shared, seed.majors.ds, true)
+  const originalShared = localStorage.getItem(SHARED)
+  store.migrateStorage()
+  const minorOn = store.resolveMinorOn()
+  assert.equal(minorOn, true, 'minor that was on stays on')
+  const view = store.loadSemesterCourses('sem3', undefined, minorOn)
+  assert.deepEqual(codes(view), ['CS2806', 'CS2000', 'CS2403', 'CS2404', 'EE', 'MAJOR', 'UE', 'MINOR1', 'MINOR2', 'MY101'])
+  const byCode = Object.fromEntries(view.map(c => [c.courseCode, c]))
+  const map = { MINOR1: 'LW2055', MINOR2: 'LW2032' }
+  for (const c of seed.shared) {
+    const now = view.find(v => v.courseCode === c.courseCode) ?? byCode[Object.keys(map).find(k => map[k] === c.courseCode)]
+    assert.deepEqual(marksOf(now), marksOf(c), `${c.courseCode} marks identical`)
+  }
+  assert.deepEqual(marksOf(byCode.MAJOR), marksOf(seed.majors.ds), 'MAJOR carries the CS2231 marks')
+  assert.equal(byCode.MAJOR.courseName, 'Major Course')
+  assert.equal(byCode.MINOR1.courseName, 'Minor Course 1')
+  assert.equal(byCode.MINOR2.courseName, 'Minor Course 2')
+  assert.equal(byCode.MY101.courseName, 'Custom course', 'custom row untouched')
+  const after = calculateSGPA(view)
+  assert.equal(after.toFixed(6), before.toFixed(6), 'same SGPA')
+  assert.equal(totalCredits(activeCourses(view)), 26) // 25 + the 1 cr custom course
+  // backups, removals, flag
+  assert.equal(localStorage.getItem(SHARED + BK), originalShared)
+  for (const m of ['ds', 'aiml', 'cyber', 'cloud']) {
+    assert.equal(localStorage.getItem(`sgpa_calc_v2_sem3_major_${m}`), null, `${m} key removed`)
+    assert.ok(localStorage.getItem(`sgpa_calc_v2_sem3_major_${m}${BK}`), `${m} key backed up`)
+  }
+  assert.equal(localStorage.getItem('sgpa_major_v1'), null)
+  assert.equal(localStorage.getItem('sgpa_major_v1' + BK), '{"id":"ds"}')
+  assert.equal(localStorage.getItem('sgpa_minors_v1' + BK), '["crim"]')
+  assert.equal(localStorage.getItem(MINOR), 'true')
+  assert.ok(localStorage.getItem(FLAG))
+  console.log(`Upgrade from 1d0510d (DS, minor on): ${codes(view).join(', ')}; every mark identical; SGPA ${before.toFixed(4)} -> ${after.toFixed(4)}`)
 
-// 10. Rerun with an existing backup: the backup is never overwritten, a reappearing old key is merged.
-const backup = localStorage.getItem('sgpa_calc_v2_sem3_ds_premigration')
-localStorage.setItem('sgpa_calc_v2_sem3_ds', oldList('ds', c => c)) // stale tab writes a blank list
-store.migrateMajorSemesterStorage()
-assert.equal(localStorage.getItem('sgpa_calc_v2_sem3_ds_premigration'), backup, 'backup untouched')
-assert.equal(localStorage.getItem('sgpa_calc_v2_sem3_ds'), null)
-assert.equal(marked(store.loadSemesterCourses('sem3', 'ds', [])), 7, 'blank stale list does not wipe live marks')
-localStorage.setItem('sgpa_calc_v2_sem3_ds', oldList('ds', c => (c.courseCode === 'CS2404' ? full60(c) : c))) // stale tab with a new mark
-store.migrateMajorSemesterStorage()
-assert.equal(localStorage.getItem('sgpa_calc_v2_sem3_ds_premigration'), backup, 'backup still untouched')
-assert.equal(store.loadSemesterCourses('sem3', 'ds', []).find(c => c.courseCode === 'CS2404').totalMarks, 87, 'tie: live copy kept')
-console.log('Rerun with existing backup: backup unchanged, reappearing old key merged without losing live marks')
+  // 7. Idempotent: a second run changes nothing; so does a rerun without the flag.
+  const snap = snapshot()
+  store.migrateStorage()
+  assert.equal(snapshot(), snap, 'second run is a no-op')
+  localStorage.removeItem(FLAG)
+  store.migrateStorage()
+  const again = JSON.parse(localStorage.getItem(SHARED))
+  assert.equal(again.filter(c => c.courseCode === 'MAJOR').length, 1, 'no duplicate MAJOR on a rerun')
+  assert.equal(localStorage.getItem(SHARED + BK), originalShared, 'backup never overwritten')
+  assert.deepEqual(codes(again), codes(view))
+  console.log('Idempotent: second run leaves storage byte-identical; rerun without the flag adds nothing')
+}
 
-// 11. Another major's specialization code in shared, typed or old data goes to its own key, never counted twice.
-mem.clear()
-localStorage.setItem('sgpa_major_v1', JSON.stringify({ id: 'ds' }))
-// old MN2 bug: aiml template saved under the ds key, plus typed CS2227 marks
-localStorage.setItem('sgpa_calc_v2_sem3_ds', JSON.stringify(buildSem3Courses('aiml', []).map(store.blankCourse).map(mark)))
-store.migrateMajorSemesterStorage()
-const dsView = store.loadSemesterCourses('sem3', 'ds', [])
-const aiView = store.loadSemesterCourses('sem3', 'aiml', [])
-assert.equal(totalCredits(dsView), 19)
-assert.equal(dsView.filter(c => c.courseCode === 'CS2227').length, 0)
-assert.equal(aiView.filter(c => c.courseCode === 'CS2227').length, 1)
-assert.equal(aiView.find(c => c.courseCode === 'CS2227').totalMarks, 87)
-// typed on the ds screen and saved: lands under aiml only
-store.saveSemesterCourses('sem3', 'ds', [...dsView, mark(store.blankCourse({ courseCode: 'CS2500', courseName: 'Cloud Computing and Big Data', credits: 3 }))])
-assert.equal(store.loadSemesterCourses('sem3', 'ds', []).filter(c => c.courseCode === 'CS2500').length, 0)
-const cloudView = store.loadSemesterCourses('sem3', 'cloud', [])
-assert.equal(cloudView.filter(c => c.courseCode === 'CS2500').length, 1)
-assert.equal(totalCredits(cloudView), 19)
-const routed = store.routeForeignMajorCourses('sem3', 'ds', [store.blankCourse({ courseCode: 'CS2405', courseName: 'Cyber Security', credits: 3 })])
-assert.equal(routed.kept.length, 0)
-assert.equal(routed.routed[0].majorId, 'cyber')
-// shared list that already holds a foreign code (data written by 6300daa) is cleaned on the next load
-localStorage.setItem('sgpa_calc_v2_sem3_shared', JSON.stringify([...JSON.parse(localStorage.getItem('sgpa_calc_v2_sem3_shared')), mark(store.blankCourse({ courseCode: 'CS2227', courseName: 'typed', credits: 3 }))]))
-store.migrateMajorSemesterStorage()
-assert.ok(!JSON.parse(localStorage.getItem('sgpa_calc_v2_sem3_shared')).some(c => c.courseCode === 'CS2227'))
-assert.equal(store.loadSemesterCourses('sem3', 'aiml', []).filter(c => c.courseCode === 'CS2227').length, 1)
-console.log('Foreign major codes: routed to their own major key, each view 19 cr with one row per code')
+// 8. Minor that was off stays off, inactive rows keep their marks and stay excluded.
+{
+  const shared = DEPLOYED_SHARED().map(c => (c.courseCode.startsWith('LW') ? { ...c, inactive: true } : c))
+  const seed = seedDeployed({ minors: '[]', shared })
+  const before = oldSgpa(seed.shared, seed.majors.ds, false)
+  store.migrateStorage()
+  assert.equal(store.resolveMinorOn(), false)
+  const view = store.loadSemesterCourses('sem3', undefined, store.resolveMinorOn())
+  assert.ok(view.filter(c => isMinorCode('sem3', c.courseCode)).every(c => c.inactive && c.totalMarks !== null))
+  assert.equal(calculateSGPA(view).toFixed(6), before.toFixed(6))
+  console.log(`Upgrade with minor off: MINOR rows inactive with marks; SGPA ${before.toFixed(4)} -> ${calculateSGPA(view).toFixed(4)}`)
+}
 
-// 12. Verifier seeds A and B (first branch layout, ds and aiml lists both holding marks,
-// saved major ds, minor on). Per course and per field: more assessments filled wins,
-// blanks are filled from the other copy, a tie goes to the last saved major.
+// 9. The selected major decides which marks the MAJOR row takes.
+for (const [label, opts, expect] of [
+  ['AI/ML on screen', { major: 'aiml' }, 'aiml'],
+  ['Sem 1 on screen, saved major AI/ML', { major: 'aiml', selection: { semester: 'sem1', divide: 'ES' } }, 'aiml'],
+  ['Sem 3 selection with an unknown major, saved Cyber', { major: 'cyber', selection: { semester: 'sem3', divide: 'zzz' } }, 'cyber'],
+]) {
+  const seed = seedDeployed(opts)
+  const before = oldSgpa(seed.shared, seed.majors[expect], true)
+  store.migrateStorage()
+  const view = store.loadSemesterCourses('sem3', undefined, store.resolveMinorOn())
+  assert.deepEqual(marksOf(view.find(c => c.courseCode === 'MAJOR')), marksOf(seed.majors[expect]), label)
+  assert.equal(calculateSGPA(view).toFixed(6), before.toFixed(6), `${label}: same SGPA`)
+  console.log(`${label}: MAJOR takes the ${seed.majors[expect].courseCode} marks, SGPA ${before.toFixed(4)} -> ${calculateSGPA(view).toFixed(4)}`)
+}
+{
+  const seed = seedDeployed({ selection: null })
+  localStorage.removeItem('sgpa_major_v1')
+  store.migrateStorage()
+  const view = store.loadSemesterCourses('sem3', undefined, true)
+  assert.deepEqual(marksOf(view.find(c => c.courseCode === 'MAJOR')), marksOf(seed.majors.ds), 'no selection or saved major: ds')
+  console.log('No selection and no saved major: falls back to the ds marks')
+}
+
+// 10. A failed write leaves the flag unset and the data in place; the next load finishes.
+for (const failing of [SHARED, SHARED + BK]) {
+  const seed = seedDeployed()
+  const original = localStorage.getItem(SHARED)
+  failWrite = k => k === failing
+  store.migrateStorage()
+  assert.equal(localStorage.getItem(FLAG), null, `write to ${failing} failed: flag unset`)
+  assert.equal(localStorage.getItem(SHARED), original, 'shared list unchanged')
+  assert.ok(localStorage.getItem('sgpa_calc_v2_sem3_major_ds'), 'major key kept for the retry')
+  assert.equal(localStorage.getItem('sgpa_minors_v1'), '["crim"]', 'old minor setting kept for the retry')
+  assert.equal(store.resolveMinorOn(), true, 'minor still reads as on before the retry')
+  failWrite = () => false
+  store.migrateStorage()
+  assert.ok(localStorage.getItem(FLAG))
+  assert.equal(localStorage.getItem(SHARED + BK), original)
+  const view = store.loadSemesterCourses('sem3', undefined, store.resolveMinorOn())
+  assert.equal(calculateSGPA(view).toFixed(6), oldSgpa(seed.shared, seed.majors.ds, true).toFixed(6))
+}
+console.log('Failed write (list or backup): flag unset, nothing lost, next load completes with the same SGPA')
+
+// 11. An existing MAJOR row is kept, no duplicate; a deleted elective stays deleted.
+{
+  const typed = varied(row('MAJOR', 'My major course', 3), 3)
+  seedDeployed({ shared: [...DEPLOYED_SHARED().slice(0, 5), typed, ...DEPLOYED_SHARED().slice(5)] })
+  store.migrateStorage()
+  const list = JSON.parse(localStorage.getItem(SHARED))
+  const majors = list.filter(c => c.courseCode === 'MAJOR')
+  assert.equal(majors.length, 1)
+  assert.deepEqual(marksOf(majors[0]), marksOf(typed))
+  assert.equal(majors[0].courseName, 'My major course')
+  // lowercase hand-typed code counts too
+  seedDeployed({ shared: [...DEPLOYED_SHARED(), row(' major ', 'typed', 3)] })
+  store.migrateStorage()
+  assert.equal(JSON.parse(localStorage.getItem(SHARED)).filter(c => c.courseCode.trim().toUpperCase() === 'MAJOR').length, 1)
+  // deleted UE
+  seedDeployed({ shared: DEPLOYED_SHARED().filter(c => c.courseCode !== UE) })
+  store.migrateStorage()
+  store.migrateStorage()
+  const noUe = store.loadSemesterCourses('sem3', undefined, true)
+  assert.ok(!noUe.some(c => c.courseCode === UE), 'deleted elective stays deleted')
+  assert.deepEqual(codes(noUe), ['CS2806', 'CS2000', 'CS2403', 'CS2404', 'EE', 'MAJOR', 'MINOR1', 'MINOR2', 'MY101'])
+  console.log('Existing MAJOR row kept (no duplicate, also for " major "); a deleted elective stays deleted')
+}
+
+// 12. A hand-typed MINOR1 next to the old row: one row, the more complete copy, nothing filled lost.
+{
+  const shared = [...DEPLOYED_SHARED(), row('MINOR1', 'typed', 3)]
+  seedDeployed({ shared })
+  store.migrateStorage()
+  const list = JSON.parse(localStorage.getItem(SHARED))
+  assert.equal(list.filter(c => c.courseCode === 'MINOR1').length, 1)
+  assert.equal(list.find(c => c.courseCode === 'MINOR1').totalMarks, shared[6].totalMarks)
+}
+
+// 13. Upgrade from 8cb4074 (before the elective): UE appended once, MAJOR placed between EE and UE.
+{
+  const shared = DEPLOYED_SHARED().filter(c => c.courseCode !== UE)
+  const seed = seedDeployed({ shared })
+  localStorage.removeItem(store.LS_CORE_ADDED)
+  store.migrateStorage()
+  const view = store.loadSemesterCourses('sem3', undefined, true)
+  assert.deepEqual(codes(view), ['CS2806', 'CS2000', 'CS2403', 'CS2404', 'EE', 'MAJOR', 'UE', 'MINOR1', 'MINOR2', 'MY101'])
+  assert.equal(view.find(c => c.courseCode === UE).totalMarks, null)
+  assert.equal(calculateSGPA(view).toFixed(6), oldSgpa(seed.shared, seed.majors.ds, true).toFixed(6))
+  console.log('Upgrade from 8cb4074: UE appended blank, MAJOR between EE and UE, SGPA unchanged')
+}
+
+// 14. First layout (whole list per major, before the elective) all the way to generic slots.
+// Per course and per field: more assessments filled wins, a tie goes to the saved major.
 const seedList = rows => JSON.stringify(rows.map(([courseCode, credits, a, b, c, d], i) => enrichCourse({
   id: `seed-${courseCode}-${i}`, courseCode, courseName: courseCode, credits, cie1Marks: a, cie2Marks: b, cie3Marks: c, seeMarks: d,
 })))
@@ -200,109 +290,91 @@ const SEEDS = {
   B: {
     ds:   [['CS2806', 2, 18, 22, 23, 28], ['CS2000', 4, 16, _, _, _], ['CS2403', 3, 14, 18, 18, 22], ['CS2231', 3, 12, 15, 16, 20], ['CS2404', 3, 10, 13, 14, 18], ['EE', 2, 9, 12, 12, 14], ['LW2055', 3, 8, 10, 10, 14], ['LW2032', 3, 17, 21, 22, 26]],
     aiml: [['CS2806', 2, 10, 12, 12, 16], ['CS2000', 4, 19, 24, 24, 29], ['CS2403', 3, _, _, _, _], ['CS2227', 3, 19, 24, 24, 29], ['CS2404', 3, _, _, _, _], ['EE', 2, _, _, _, _], ['LW2055', 3, _, _, _, _], ['LW2032', 3, _, _, _, _]],
-    expect: { ds: [172, 23], aiml: [181, 23] },
+    expect: { ds: [172, 23] },
   },
 }
 for (const [name, seed] of Object.entries(SEEDS)) {
-  mem.clear()
-  localStorage.setItem('sgpa_major_v1', JSON.stringify({ id: 'ds' }))
-  localStorage.setItem('sgpa_minors_v1', '["crim"]')
-  localStorage.setItem('sgpa_calc_v2_sem3_ds', seedList(seed.ds))
-  localStorage.setItem('sgpa_calc_v2_sem3_aiml', seedList(seed.aiml))
-  store.migrateMajorSemesterStorage()
-  const out = []
-  for (const major of ['ds', 'aiml']) {
-    const view = store.loadSemesterCourses('sem3', major, store.resolveMinors())
+  for (const [major, expect] of Object.entries(seed.expect)) {
+    reset()
+    localStorage.setItem('sgpa_major_v1', JSON.stringify({ id: major }))
+    localStorage.setItem('sgpa_minors_v1', '["crim"]')
+    localStorage.setItem('sgpa_calc_v2_sem3_ds', seedList(seed.ds))
+    localStorage.setItem('sgpa_calc_v2_sem3_aiml', seedList(seed.aiml))
+    store.migrateStorage()
+    assert.ok(localStorage.getItem(FLAG), 'generic migration ran after the layout migration')
+    assert.equal(localStorage.getItem('sgpa_calc_v2_sem3_ds'), null)
+    assert.ok(localStorage.getItem('sgpa_calc_v2_sem3_ds_premigration'))
+    const view = store.loadSemesterCourses('sem3', undefined, store.resolveMinorOn())
+    assert.deepEqual(codes(view), ['CS2806', 'CS2000', 'CS2403', 'CS2404', 'EE', 'MAJOR', 'UE', 'MINOR1', 'MINOR2'])
+    assert.equal(view.find(c => c.courseCode === UE).totalMarks, null, 'appended elective is blank')
     const scored = view.filter(c => c.creditGradeProduct !== null)
     const cgp = scored.reduce((s, c) => s + c.creditGradeProduct, 0), cr = totalCredits(scored)
-    assert.equal(view.length, 9, 'seed lists predate the elective: it is appended')
-    assert.equal(view.find(c => c.courseCode === UE).totalMarks, null, 'appended elective is blank')
     assert.equal(scored.length, 8, `seed ${name} ${major}: every seeded course graded`)
-    assert.deepEqual([cgp, cr], seed.expect[major], `seed ${name} ${major}`)
-    assert.equal(calculateSGPA(view).toFixed(4), (cgp / cr).toFixed(4))
-    out.push(`${major} ${cgp}/${cr} = ${(cgp / cr).toFixed(2)}`)
+    assert.deepEqual([cgp, cr], expect, `seed ${name} ${major}`)
+    console.log(`First layout seed ${name}, saved major ${major}: ${cgp}/${cr} = ${(cgp / cr).toFixed(2)} (same as the per-major view before)`)
   }
-  const v = store.loadSemesterCourses('sem3', 'ds', ['crim'])
-  const pick = code => { const c = v.find(x => x.courseCode === code); return [c.cie1Marks, c.cie2Marks, c.cie3Marks, c.seeMarks].join('/') }
-  if (name === 'B') {
-    assert.equal(pick('CS2000'), '19/24/24/29', 'B: complete aiml CS2000 kept, fully graded')
-    assert.equal(pick('CS2806'), '18/22/23/28', 'B: CS2806 tie goes to the last saved major (ds)')
-    assert.equal(JSON.parse(localStorage.getItem('sgpa_calc_v2_sem3_aiml_premigration')).find(c => c.courseCode === 'CS2806').cie1Marks, 10, 'B: aiml CS2806 kept in its backup')
-  } else {
-    assert.equal(pick('EE'), '9/12/12/14', 'A: EE taken from the aiml list')
-  }
-  console.log(`Verifier seed ${name}: CS2000 ${pick('CS2000')}, CS2806 ${pick('CS2806')}, EE ${pick('EE')}; ${out.join(', ')}`)
 }
+// first layout migration failing (storage full) holds the generic migration back
+reset()
+localStorage.setItem('sgpa_calc_v2_sem3_ds', seedList(SEEDS.A.ds))
+failWrite = k => k === SHARED
+store.migrateStorage()
+assert.equal(localStorage.getItem(FLAG), null, 'waits while the old whole-list key remains')
+failWrite = () => false
+store.migrateStorage()
+assert.ok(localStorage.getItem(FLAG))
+assert.equal(marked(store.loadSemesterCourses('sem3', undefined, true)), 7) // the ds list has EE blank
+console.log('First layout: generic migration waits until the layout migration succeeds')
+
+// 15. After the migration, old-format keys from a stale tab are ignored and a hand-typed
+// CS2231 row stays in the list (the old layout migration no longer runs).
+{
+  seedDeployed()
+  store.migrateStorage()
+  const list = store.loadSemesterCourses('sem3', undefined, true)
+  store.saveSemesterCourses('sem3', undefined, [...list, row('CS2231', 'Typed by hand', 3)])
+  const snap = localStorage.getItem(SHARED)
+  localStorage.setItem('sgpa_calc_v2_sem3_major_ds', '[]')
+  store.migrateStorage()
+  assert.equal(localStorage.getItem(SHARED), snap)
+  assert.ok(store.loadSemesterCourses('sem3', undefined, true).some(c => c.courseCode === 'CS2231'))
+  console.log('After migration: stale per-major keys ignored, a hand-typed CS2231 row stays put')
+}
+
+// 16. Junk saved values never crash and fall back to the template.
+for (const junk of ['[null]', '[{"foo":1}]', '[5,"x"]', '{oops', '"str"', '42', '[]']) {
+  reset()
+  localStorage.setItem(SHARED, junk)
+  localStorage.setItem('sgpa_calc_v2_sem3_major_ds', junk)
+  localStorage.setItem('sgpa_major_v1', junk)
+  localStorage.setItem('sgpa_minors_v1', junk)
+  localStorage.setItem('sgpa_selection_v1', junk)
+  store.migrateStorage()
+  assert.ok(localStorage.getItem(FLAG), `junk ${junk}: migration completes`)
+  assert.equal(localStorage.getItem(SHARED), junk, `junk ${junk}: list left as stored`)
+  const v = store.loadSemesterCourses('sem3', undefined, store.resolveMinorOn())
+  assert.equal(v.length, 7, `junk ${junk} falls back to the template`)
+  assert.equal(totalCredits(activeCourses(v)), 19)
+}
+// junk list but marks on the selected major course: start from the template, keep the marks
+reset()
+localStorage.setItem(SHARED, '{oops')
+const dsMarks = varied(row('CS2231', 'Data Science', 3), 4)
+localStorage.setItem('sgpa_calc_v2_sem3_major_ds', JSON.stringify([dsMarks]))
+store.migrateStorage()
+{
+  const v = store.loadSemesterCourses('sem3', undefined, false)
+  assert.deepEqual(codes(v), codes(noMinor))
+  assert.deepEqual(marksOf(v.find(c => c.courseCode === 'MAJOR')), marksOf(dsMarks))
+  assert.equal(localStorage.getItem(SHARED + BK), '{oops')
+}
+console.log('Junk values: no crash, template fallback; marks on the major course survive a junk list')
+
 // Field-level fill: the winner's blank fields come from the other copy, nothing filled is cleared.
 const merged = mergeByCode([enrichCourse({ courseCode: 'X', credits: 3, cie1Marks: 10, cie2Marks: 12, cie3Marks: 12, seeMarks: null })],
   [enrichCourse({ courseCode: 'X', credits: 3, cie1Marks: 15, cie2Marks: null, cie3Marks: null, seeMarks: 20 })], true)[0]
 assert.equal([merged.cie1Marks, merged.cie2Marks, merged.cie3Marks, merged.seeMarks].join('/'), '10/12/12/20')
 assert.equal(merged.totalMarks, 54)
-console.log('Field-level merge: 10/12/12/- + 15/-/-/20 -> 10/12/12/20 (winner kept, blank SEE filled)')
 
-// 13. Upgrade from the format deployed before the elective (8cb4074): the saved shared list
-// gains the elective row once, blank, after the core; every existing row is unchanged.
-mem.clear()
-const OLD_SHARED = [['CS2806', 'Calculus', 2], ['CS2000', 'Design and Analysis of Algorithms', 4], ['CS2403', 'Computer Networks', 3],
-  ['CS2404', 'Internet of Things', 3], ['EE', 'Environment Education', 2], ['LW2055', 'Fundamentals of Criminology', 3], ['LW2032', 'Criminological Theories', 3]]
-  .map(([courseCode, courseName, credits]) => mark(store.blankCourse({ courseCode, courseName, credits })))
-OLD_SHARED.push(mark(store.blankCourse({ courseCode: 'MY101', courseName: 'Custom course', credits: 1 })))
-const oldSharedJson = JSON.parse(JSON.stringify(OLD_SHARED))
-localStorage.setItem('sgpa_major_v1', JSON.stringify({ id: 'ds' }))
-localStorage.setItem('sgpa_selection_v1', JSON.stringify({ semester: 'sem3', divide: 'ds' }))
-localStorage.setItem('sgpa_minors_v1', '["crim"]')
-localStorage.setItem(store.LS_MAJOR_SEM_MIGRATED, '2026-10-07T00:00:00.000Z')
-localStorage.setItem('sgpa_calc_v2_sem3_shared', JSON.stringify(OLD_SHARED))
-localStorage.setItem('sgpa_calc_v2_sem3_major_ds', JSON.stringify([mark(store.blankCourse({ courseCode: 'CS2231', courseName: 'Data Science', credits: 3 }))]))
-store.migrateMajorSemesterStorage() // what App runs on every load
-const upShared = JSON.parse(localStorage.getItem('sgpa_calc_v2_sem3_shared'))
-assert.deepEqual(upShared.map(c => c.courseCode), ['CS2806', 'CS2000', 'CS2403', 'CS2404', 'EE', UE, 'LW2055', 'LW2032', 'MY101'])
-assert.deepEqual(upShared.filter(c => c.courseCode !== UE), oldSharedJson, 'every prior row unchanged, marks intact')
-assert.equal(upShared.find(c => c.courseCode === UE).totalMarks, null)
-const upView = store.loadSemesterCourses('sem3', 'ds', store.resolveMinors())
-assert.equal(upView.length, 10)
-assert.equal(marked(upView), 9, 'all 9 prior marks kept (8 Sem 3 + custom), elective blank')
-assert.equal(totalCredits(activeCourses(upView)), 26) // 25 + the 1 cr custom course
-store.migrateMajorSemesterStorage()
-assert.equal(JSON.parse(localStorage.getItem('sgpa_calc_v2_sem3_shared')).filter(c => c.courseCode === UE).length, 1, 'appended once')
-// deleting the elective sticks across reloads
-store.saveSemesterCourses('sem3', 'ds', upView.filter(c => c.courseCode !== UE))
-store.migrateMajorSemesterStorage()
-assert.ok(!store.loadSemesterCourses('sem3', 'ds', ['crim']).some(c => c.courseCode === UE), 'a deleted elective is not re-added')
-// a list that already has the code (typed in by hand) keeps its own row, no duplicate
-mem.clear()
-localStorage.setItem('sgpa_calc_v2_sem3_shared', JSON.stringify([...OLD_SHARED.slice(0, 5), mark(store.blankCourse({ ...SEM3_UNIVERSITY_ELECTIVE, courseName: 'Typed by hand' }))]))
-store.migrateMajorSemesterStorage()
-const typed = JSON.parse(localStorage.getItem('sgpa_calc_v2_sem3_shared')).filter(c => c.courseCode === UE)
-assert.equal(typed.length, 1)
-assert.equal(typed[0].courseName, 'Typed by hand')
-console.log(`Upgrade from the deployed format: ${UE} appended once after EE (blank), all prior rows and marks unchanged; a deleted elective stays deleted`)
-
-// junk saved lists are not extended: they fall back to the full template (7 courses, 19 cr for DS without minor)
-for (const junk of ['[null]', '[{"foo":1}]', '[5,"x"]']) {
-  mem.clear()
-  localStorage.setItem('sgpa_calc_v2_sem3_shared', junk)
-  store.migrateMajorSemesterStorage()
-  assert.equal(localStorage.getItem('sgpa_calc_v2_sem3_shared'), junk, `junk ${junk} left untouched`)
-  const v = store.loadSemesterCourses('sem3', 'ds', [])
-  assert.equal(v.length, 7, `junk ${junk} falls back to the template`)
-  assert.equal(totalCredits(activeCourses(v)), 19)
-}
-// a lowercase or padded hand-typed code counts as the elective: no duplicate
-mem.clear()
-localStorage.setItem('sgpa_calc_v2_sem3_shared', JSON.stringify([...OLD_SHARED.slice(0, 5), mark(store.blankCourse({ ...SEM3_UNIVERSITY_ELECTIVE, courseCode: ' ue ' }))]))
-store.migrateMajorSemesterStorage()
-assert.equal(JSON.parse(localStorage.getItem('sgpa_calc_v2_sem3_shared')).length, 6, 'no duplicate for a normalized code match')
-// old per-major keys still present: the elective upgrade waits (not marked done)
-mem.clear()
-localStorage.setItem('sgpa_calc_v2_sem3_shared', JSON.stringify(OLD_SHARED))
-localStorage.setItem('sgpa_calc_v2_sem3_ds', '[]')
-store.addLaterCoreCourses()
-assert.ok(!(localStorage.getItem(store.LS_CORE_ADDED) ?? '').includes('sem3:'), 'not marked done while old keys remain')
-assert.ok(!JSON.parse(localStorage.getItem('sgpa_calc_v2_sem3_shared')).some(c => c.courseCode === UE), 'nothing appended while old keys remain')
-localStorage.removeItem(store.LS_MAJOR_SEM_MIGRATED)
-store.migrateMajorSemesterStorage() // migration clears the old key, then the upgrade runs
-store.migrateMajorSemesterStorage()
-assert.equal(JSON.parse(localStorage.getItem('sgpa_calc_v2_sem3_shared')).filter(c => c.courseCode === UE).length, 1, 'added exactly once after the migration runs')
-console.log('Elective upgrade: junk lists fall back to the template, normalized codes do not duplicate, waits while old per-major keys remain')
+assert.deepEqual(SEM3_CORE_COURSES.slice(0, 5).map(c => [c.courseCode, c.credits]), [['CS2806', 2], ['CS2000', 4], ['CS2403', 3], ['CS2404', 3], ['EE', 2]])
 console.log('OK: Sem 3 credit and storage checks passed')
