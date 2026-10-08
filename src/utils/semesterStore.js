@@ -187,6 +187,13 @@ const toMajorRow = src => (src
   ? { ...src, courseCode: SEM3_MAJOR_COURSE.courseCode, courseName: SEM3_MAJOR_COURSE.courseName }
   : blankCourse(SEM3_MAJOR_COURSE))
 
+// Ids of the courses kept in a key's _premigration_v3 backup. An old tab saving after the
+// migration replays its pre-deploy rows with these ids; rows added in the new build get new ids.
+function backupIds(key) {
+  const raw = readJson(key + BACKUP_SUFFIX_V3)
+  return new Set((Array.isArray(raw) ? raw : []).filter(c => isCourse(c) && c.id != null).map(c => c.id))
+}
+
 // Where a missing MAJOR row goes: after EE, else before UE, else after the last core row, else first.
 function majorInsertAt(list) {
   const find = code => list.findIndex(c => isCourse(c) && normCode(c.courseCode) === code)
@@ -386,9 +393,15 @@ export function migrateGenericSem3Slots() {
 //   row already exists the two are merged field by field into it (the generic row wins
 //   on conflicts, its blanks are filled from the old row) and the old row is dropped,
 //   so the course counts once. Without evidence, hand-typed LW rows stay as they are;
+//   An old minor row whose id is in the list's _premigration_v3 backup also counts as
+//   evidence (an old save whose per-major key write failed);
 // - a reappeared per-major key fills the MAJOR row (same choice of course as the
-//   migration): inserted when missing and the chosen course has marks (a deleted MAJOR
-//   is never brought back blank), marks filled when it is blank; then the key is removed;
+//   migration), marks filled when it is blank; then the key is removed. A missing MAJOR
+//   is inserted when the chosen course has marks, or blank when the old tab replays its
+//   pre-deploy major row (id equal to the one in <majorKey>_premigration_v3) or saved an
+//   old-format list (old minor rows present). A MAJOR the user deleted is not brought back
+//   blank: an old build that only opens migrated data writes a fresh row with a new id and
+//   no old minor rows;
 // - a reappeared old minors setting turns the minor on when it says on. It turns it off
 //   only when the list still holds old minor rows, i.e. the old tab showed them and the
 //   minor was switched off there; an old build that merely opened on migrated data
@@ -407,7 +420,11 @@ export function repairStaleSem3() {
     const hasOldMinor = !!shared?.some(c => isCourse(c) && LEGACY_SEM3_MINOR_CODES[c.courseCode])
     const oldMinors = localStorage.getItem(LEGACY_MINORS_KEY) !== null
     const oldMajor = localStorage.getItem(LEGACY_MAJOR_KEY) !== null
-    if (!presentMajorIds.length && !oldMinors && !oldMajor) return // no old save: nothing to repair
+    // an old minor row whose id is in the list's backup was saved by an old tab, even when its
+    // per-major key write failed; a hand-typed row has a new id
+    const sharedBk = hasOldMinor ? backupIds(sKey) : null
+    const replayedMinor = hasOldMinor && shared.some(c => isCourse(c) && LEGACY_SEM3_MINOR_CODES[c.courseCode] && sharedBk.has(c.id))
+    if (!presentMajorIds.length && !oldMinors && !oldMajor && !replayedMinor) return // no old save: nothing to repair
 
     let list = shared ? shared.slice() : null
     if (list && hasOldMinor) {
@@ -426,12 +443,19 @@ export function repairStaleSem3() {
       }
     }
 
-    if (presentMajorIds.length) {
-      const src = pickLegacyMajorSource(resolveLegacyMajor())
+    // the old tab replays its pre-deploy major row (same id as in the backup) or saved an
+    // old-format list (old minor rows; its view never had MAJOR, e.g. after its reset):
+    // MAJOR was not deleted by the user, so a missing one comes back even when blank
+    const replayedMajor = presentMajorIds.some(id => {
+      const ids = backupIds(majorKey('sem3', id)), raw = readJson(majorKey('sem3', id))
+      return Array.isArray(raw) && raw.some(c => isCourse(c) && c.courseCode === LEGACY_SEM3_MAJOR_CODES[id] && ids.has(c.id))
+    })
+    if (presentMajorIds.length || replayedMinor) {
+      const src = presentMajorIds.length ? pickLegacyMajorSource(resolveLegacyMajor()) : null
       if (list) {
         const m = list.findIndex(c => isCourse(c) && normCode(c.courseCode) === SEM3_MAJOR_COURSE.courseCode)
         if (m < 0) {
-          if (src && hasMarks(src)) {
+          if ((src && hasMarks(src)) || replayedMajor || hasOldMinor) {
             const at = majorInsertAt(list)
             list = [...list.slice(0, at), toMajorRow(src), ...list.slice(at)]
           }
