@@ -47,7 +47,7 @@ const blank = v => v === null || v === undefined || v === ''
 // Combine two copies of one course: the winner keeps every field it has, and any
 // assessment it is missing is filled from the other copy. Nothing filled is ever
 // cleared. Grade-only entries (directGrade) are not mixed with marks.
-function mergeCourse(winner, other) {
+export function mergeCourse(winner, other) {
   if (winner.directGrade != null || other.directGrade != null) return winner
   const out = { ...winner }
   let filled = false

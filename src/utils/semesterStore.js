@@ -14,7 +14,7 @@ import { LS_KEY_PREFIX, LS_SELECTION, LS_MINOR, SEMESTERS, CORE_ADDED_LATER, SEM
 import { loadMinorOn } from './localStorage.js'
 import {
   courseTemplate, isCommonSemester, syncMinorCourses, inferMinorOn, mergeByCode, dedupeByCode,
-  filledCount, hasMarks,
+  filledCount, hasMarks, mergeCourse,
 } from './semesterTemplates.js'
 
 // Set once the first-layout migration has run (value: ISO time of the first run).
@@ -379,15 +379,21 @@ export function migrateGenericSem3Slots() {
 }
 
 // Repair after a tab still running the old version saved over migrated data. Runs on
-// every load once the migration flag is set; does nothing when there is nothing old:
+// every load once the migration flag is set. It acts only on evidence of an old save
+// (a reappeared per-major key, old minors setting or old saved major; every old save
+// writes a per-major key) and does nothing otherwise:
 // - LW2055 / LW2032 rows in the Sem 3 list become MINOR1 / MINOR2 again. When a MINOR
-//   row already exists: a blank one takes the old row's marks (one row, no duplicate);
-//   if the old row is blank it is dropped; if both have marks the generic row is kept
-//   and the old row is left as it is, so no mark is lost;
-// - a reappeared per-major key fills the MAJOR row (inserted when missing, marks filled
-//   when blank; same choice of course as the migration), then is removed;
-// - a reappeared old minors setting updates the minor switch, a reappeared saved major
-//   is only used to pick the course; both are removed;
+//   row already exists the two are merged field by field into it (the generic row wins
+//   on conflicts, its blanks are filled from the old row) and the old row is dropped,
+//   so the course counts once. Without evidence, hand-typed LW rows stay as they are;
+// - a reappeared per-major key fills the MAJOR row (same choice of course as the
+//   migration): inserted when missing and the chosen course has marks (a deleted MAJOR
+//   is never brought back blank), marks filled when it is blank; then the key is removed;
+// - a reappeared old minors setting turns the minor on when it says on. It turns it off
+//   only when the list still holds old minor rows, i.e. the old tab showed them and the
+//   minor was switched off there; an old build that merely opened on migrated data
+//   (it cannot see MINOR rows and writes "off") leaves the switch alone. A reappeared
+//   saved major is only used to pick the course. Both are removed;
 // - every key changed or removed is first copied to <key>_stale_<time> (a new key each
 //   time, never overwritten). A failed write aborts before anything is removed, and
 //   the next load tries again. Hand-typed rows with old major codes stay untouched.
@@ -398,10 +404,10 @@ export function repairStaleSem3() {
     const presentMajorIds = LEGACY_MAJOR_IDS.filter(id => localStorage.getItem(majorKey('sem3', id)) !== null)
     const rawShared = readJson(sKey)
     const shared = Array.isArray(rawShared) && rawShared.some(isCourse) ? rawShared : null
-    const hasOldMinor = shared?.some(c => isCourse(c) && LEGACY_SEM3_MINOR_CODES[c.courseCode])
+    const hasOldMinor = !!shared?.some(c => isCourse(c) && LEGACY_SEM3_MINOR_CODES[c.courseCode])
     const oldMinors = localStorage.getItem(LEGACY_MINORS_KEY) !== null
     const oldMajor = localStorage.getItem(LEGACY_MAJOR_KEY) !== null
-    if (!hasOldMinor && !presentMajorIds.length && !oldMinors && !oldMajor) return
+    if (!presentMajorIds.length && !oldMinors && !oldMajor) return // no old save: nothing to repair
 
     let list = shared ? shared.slice() : null
     if (list && hasOldMinor) {
@@ -412,10 +418,10 @@ export function repairStaleSem3() {
           if (!isCourse(c) || c.courseCode !== from) continue
           const g = list.findIndex(x => isCourse(x) && normCode(x.courseCode) === to)
           const renamed = { ...c, courseCode: to, courseName: name }
-          if (g < 0) list[i] = renamed
-          else if (!hasMarks(list[g])) { list[g] = { ...renamed, id: list[g].id ?? renamed.id }; list.splice(i, 1); i-- }
-          else if (!hasMarks(c)) { list.splice(i, 1); i-- }
-          // both have marks: keep the generic row, leave the old row as it is
+          if (g < 0) { list[i] = renamed; continue }
+          // merge into the existing MINOR row (a blank one simply takes the old row), drop the old row
+          list[g] = hasMarks(list[g]) ? mergeCourse(list[g], renamed) : { ...renamed, id: list[g].id ?? renamed.id }
+          list.splice(i, 1); i--
         }
       }
     }
@@ -425,8 +431,10 @@ export function repairStaleSem3() {
       if (list) {
         const m = list.findIndex(c => isCourse(c) && normCode(c.courseCode) === SEM3_MAJOR_COURSE.courseCode)
         if (m < 0) {
-          const at = majorInsertAt(list)
-          list = [...list.slice(0, at), toMajorRow(src), ...list.slice(at)]
+          if (src && hasMarks(src)) {
+            const at = majorInsertAt(list)
+            list = [...list.slice(0, at), toMajorRow(src), ...list.slice(at)]
+          }
         } else if (!hasMarks(list[m]) && src && hasMarks(src)) {
           const filled = { ...list[m] }
           for (const k of ['cie1Marks', 'cie2Marks', 'cie3Marks', 'seeMarks', 'directGrade', 'totalMarks', 'grade', 'gradePoint', 'creditGradeProduct']) {
@@ -443,7 +451,8 @@ export function repairStaleSem3() {
     if (list && JSON.stringify(list) !== JSON.stringify(rawShared)) sets.push([sKey, JSON.stringify(list)])
     if (oldMinors) {
       const legacy = normalizeLegacyMinors(readJson(LEGACY_MINORS_KEY))
-      if (legacy) sets.push([LS_MINOR, JSON.stringify(legacy.length > 0)])
+      if (legacy?.length) sets.push([LS_MINOR, 'true'])
+      else if (legacy && hasOldMinor) sets.push([LS_MINOR, 'false'])
       removes.push(LEGACY_MINORS_KEY)
     }
     for (const id of presentMajorIds) removes.push(majorKey('sem3', id))
