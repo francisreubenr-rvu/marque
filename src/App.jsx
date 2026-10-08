@@ -17,7 +17,7 @@ import { courseTemplate, isCommonSemester, isMinorCode, syncMinorCourses, active
 import {
   courseKey, blankCourse, makeCoursesFromTemplate, loadSemesterCourses, saveSemesterCourses,
   clearSemesterCourses, resolveMinorOn, normalizeSelection, migrateStorage,
-  loadSelection, saveSelection,
+  loadSelection, saveSelection, mapRetiredSem3Codes,
 } from './utils/semesterStore'
 
 // ── Migrate legacy sem1_CSE key → sem1_ES or sem1_EEX ───────
@@ -268,7 +268,9 @@ export default function App() {
   }, [])
 
   const importCourses = useCallback((newCourses) => {
-    const imported = newCourses.map((c, i) => enrichCourse({
+    // Sem 3: old exports may carry the retired minor and specialization codes
+    const rows = selection?.semester === 'sem3' ? mapRetiredSem3Codes(newCourses) : newCourses
+    const imported = rows.map((c, i) => enrichCourse({
       id: `c-${Date.now()}-${i}-${Math.random().toString(36).slice(2)}`,
       courseCode: c.courseCode, courseName: c.courseName, credits: c.credits,
       cie1Marks: null, cie2Marks: null, cie3Marks: null, seeMarks: null,
@@ -278,7 +280,7 @@ export default function App() {
     // Keep switched-off minor courses (and their marks) unless the import replaces them,
     // then apply the minor switch to the result so imported minor rows match it.
     setCourses(prev => fitToSemester([...imported, ...prev.filter(c => c.inactive && !imported.some(n => n.courseCode === c.courseCode))]))
-  }, [minorHint, fitToSemester])
+  }, [selection, minorHint, fitToSemester])
 
   const resetAll = useCallback(() => {
     if (!selection) return

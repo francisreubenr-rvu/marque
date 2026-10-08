@@ -64,7 +64,8 @@ export const SEM1_EEX_COURSES = [
 
 // Sem 3 generic slots. Electives, the major course and minor courses differ from
 // student to student but carry the same credits for everyone, so each is one generic
-// row. Rename or replace a row with your own course code if you want it named.
+// row. To name one, delete it and add your own course code (minor rows come back
+// while the minor is on).
 export const SEM3_MAJOR_COURSE        = { courseCode: 'MAJOR', courseName: 'Major Course',        credits: 3 }
 export const SEM3_UNIVERSITY_ELECTIVE = { courseCode: 'UE',    courseName: 'University Elective', credits: 2 }
 

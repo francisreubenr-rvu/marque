@@ -59,31 +59,6 @@ export function RippleBtn({ children, onClick, style, disabled, ...rest }) {
   )
 }
 
-export function TiltCard({ children, style, intensity, onMouseEnter, onMouseLeave, ...rest }) {
-  const ref = useRef(null)
-  const deg = intensity || 7
-
-  const onMove = (e) => {
-    if (!ref.current) return
-    const { left, top, width, height } = ref.current.getBoundingClientRect()
-    const x = (e.clientX - left) / width  - 0.5
-    const y = (e.clientY - top)  / height - 0.5
-    ref.current.style.transform = `perspective(700px) rotateX(${-y * deg}deg) rotateY(${x * deg}deg) scale(1.03) translateZ(6px)`
-  }
-
-  const onLeave = (e) => {
-    if (ref.current) ref.current.style.transform = 'perspective(700px) rotateX(0deg) rotateY(0deg) scale(1) translateZ(0)'
-    onMouseLeave && onMouseLeave(e)
-  }
-
-  return (
-    <div ref={ref} onMouseMove={onMove} onMouseEnter={onMouseEnter} onMouseLeave={onLeave}
-      style={{ transition: 'transform .14s ease', transformStyle: 'preserve-3d', willChange: 'transform', ...style }} {...rest}>
-      {children}
-    </div>
-  )
-}
-
 export function CursorFollower() {
   const dotRef  = useRef(null)
   const ringRef = useRef(null)

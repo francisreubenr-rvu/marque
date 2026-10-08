@@ -15,7 +15,7 @@ globalThis.localStorage = {
 const snapshot = () => JSON.stringify([...mem.entries()].sort())
 const reset = () => { mem.clear(); failWrite = () => false }
 
-const { buildSem3Courses, courseTemplate, totalCredits, syncMinorCourses, activeCourses, mergeByCode, isMinorCode } = await import('../src/utils/semesterTemplates.js')
+const { buildSem3Courses, courseTemplate, totalCredits, syncMinorCourses, activeCourses, mergeByCode, dedupeByCode, isMinorCode } = await import('../src/utils/semesterTemplates.js')
 const { SEM3_UNIVERSITY_ELECTIVE, SEM3_MAJOR_COURSE, MINOR_COURSES, SEM3_CORE_COURSES } = await import('../src/utils/constants.js')
 const { calculateSGPA, enrichCourse } = await import('../src/utils/calculations.js')
 const store = await import('../src/utils/semesterStore.js')
@@ -338,7 +338,9 @@ console.log('First layout: generic migration waits until the layout migration su
   store.migrateStorage()
   assert.equal(localStorage.getItem(SHARED), snap)
   assert.ok(store.loadSemesterCourses('sem3', undefined, true).some(c => c.courseCode === 'CS2231'))
-  console.log('After migration: stale per-major keys ignored, a hand-typed CS2231 row stays put')
+  assert.equal(localStorage.getItem('sgpa_calc_v2_sem3_major_ds'), null, 'reappeared per-major key removed')
+  assert.ok([...mem.keys()].some(k => k.startsWith('sgpa_calc_v2_sem3_major_ds_stale_')), 'and backed up')
+  console.log('After migration: an empty reappeared per-major key is backed up and removed, a hand-typed CS2231 row stays put')
 }
 
 // 16. Junk saved values never crash and fall back to the template.
@@ -369,6 +371,141 @@ store.migrateStorage()
   assert.equal(localStorage.getItem(SHARED + BK), '{oops')
 }
 console.log('Junk values: no crash, template fallback; marks on the major course survive a junk list')
+
+// 17. M2: the selected major's course is blank or missing but another major has marks.
+{
+  const seed = seedDeployed()
+  localStorage.setItem('sgpa_calc_v2_sem3_major_ds', JSON.stringify([row('CS2231', 'Data Science', 3)])) // blank
+  localStorage.setItem('sgpa_calc_v2_sem3_major_cyber', JSON.stringify([varied(row('CS2405', 'Cyber Security', 3), 6)]))
+  store.migrateStorage()
+  const major = store.loadSemesterCourses('sem3', undefined, true).find(c => c.courseCode === 'MAJOR')
+  assert.deepEqual(marksOf(major), marksOf(seed.majors.aiml), 'tie between full aiml and cyber goes to aiml (aiml, ds, cyber, cloud order)')
+  seedDeployed()
+  localStorage.removeItem('sgpa_calc_v2_sem3_major_ds') // missing
+  const cyber = varied(row('CS2405', 'Cyber Security', 3), 6)
+  localStorage.setItem('sgpa_calc_v2_sem3_major_aiml', JSON.stringify([enrichCourse({ ...row('CS2227', 'x', 3), cie1Marks: 15, cie2Marks: 20 })]))
+  localStorage.setItem('sgpa_calc_v2_sem3_major_cyber', JSON.stringify([cyber]))
+  store.migrateStorage()
+  assert.deepEqual(marksOf(store.loadSemesterCourses('sem3', undefined, true).find(c => c.courseCode === 'MAJOR')), marksOf(cyber), 'most filled other major wins')
+  // the selected major's marks still win when it has any
+  const s2 = seedDeployed()
+  store.migrateStorage()
+  assert.deepEqual(marksOf(store.loadSemesterCourses('sem3', undefined, true).find(c => c.courseCode === 'MAJOR')), marksOf(s2.majors.ds))
+  console.log('Selected major blank or missing: MAJOR filled from the most complete other major (tie to aiml, ds, cyber, cloud order)')
+}
+
+// 18. M1: a tab still on the old version saves over migrated data (reviewer probe S1).
+// Tab B migrates; tab A (old, loaded before the deploy) then edits EE and the major course
+// and saves its whole old-format list plus the per-major key. The next load repairs it.
+{
+  const seed = seedDeployed({ shared: DEPLOYED_SHARED().filter(c => c.courseCode !== 'MY101') })
+  const tabA = seed.shared.map(c => ({ ...c }))
+  store.migrateStorage() // tab B
+  const editedShared = tabA.map(c => (c.courseCode === 'EE' ? enrichCourse({ ...c, seeMarks: 28 }) : c))
+  const editedMajor = enrichCourse({ ...seed.majors.ds, seeMarks: 29 })
+  localStorage.setItem(SHARED, JSON.stringify(editedShared)) // tab A save effect
+  localStorage.setItem('sgpa_calc_v2_sem3_major_ds', JSON.stringify([editedMajor]))
+  const staleShared = localStorage.getItem(SHARED)
+  const staleSgpa = oldSgpa(editedShared, editedMajor, true) // what tab A showed
+  store.migrateStorage() // next load of the new build
+  const view = store.loadSemesterCourses('sem3', undefined, store.resolveMinorOn())
+  assert.deepEqual(codes(view), ['CS2806', 'CS2000', 'CS2403', 'CS2404', 'EE', 'MAJOR', 'UE', 'MINOR1', 'MINOR2'])
+  assert.deepEqual(marksOf(view.find(c => c.courseCode === 'MAJOR')), marksOf(editedMajor), 'MAJOR rebuilt from the stale major key')
+  assert.equal(view.find(c => c.courseCode === 'EE').seeMarks, 28, 'stale edit kept')
+  assert.equal(calculateSGPA(view).toFixed(6), staleSgpa.toFixed(6), 'SGPA matches what the old tab showed')
+  assert.equal(localStorage.getItem('sgpa_calc_v2_sem3_major_ds'), null)
+  const bk = [...mem.keys()].filter(k => k.includes('_stale_'))
+  assert.ok(bk.some(k => k.startsWith(SHARED + '_stale_') && mem.get(k) === staleShared), 'stale list backed up')
+  assert.ok(bk.some(k => k.startsWith('sgpa_calc_v2_sem3_major_ds_stale_')), 'stale major key backed up')
+  assert.equal(localStorage.getItem(SHARED + BK), JSON.stringify(seed.shared), 'migration backup untouched')
+  const snap = snapshot()
+  store.migrateStorage()
+  assert.equal(snapshot(), snap, 'repair is idempotent')
+  console.log(`Stale old-version tab (probe S1): MINOR1/MINOR2 and MAJOR restored, SGPA ${staleSgpa.toFixed(4)} (old tab) -> ${calculateSGPA(view).toFixed(4)}; second load is a no-op`)
+
+  // S2: minor off in the old tab: rows come back inactive and the switch still reaches them
+  const s2 = seedDeployed({ minors: '[]', shared: DEPLOYED_SHARED().map(c => (c.courseCode.startsWith('LW') ? { ...c, inactive: true } : c)) })
+  store.migrateStorage()
+  localStorage.setItem(SHARED, JSON.stringify(s2.shared))
+  localStorage.setItem('sgpa_calc_v2_sem3_major_ds', JSON.stringify([s2.majors.ds]))
+  store.migrateStorage()
+  const v2 = store.loadSemesterCourses('sem3', undefined, store.resolveMinorOn())
+  assert.equal(store.resolveMinorOn(), false)
+  assert.ok(v2.filter(c => isMinorCode('sem3', c.courseCode)).every(c => c.inactive && c.totalMarks !== null))
+  assert.equal(calculateSGPA(v2).toFixed(6), oldSgpa(s2.shared, s2.majors.ds, false).toFixed(6))
+  const v2on = syncMinorCourses(v2, 'sem3', true, store.blankCourse)
+  assert.equal(calculateSGPA(v2on).toFixed(6), oldSgpa(s2.shared, s2.majors.ds, true).toFixed(6), 'switching the minor on reaches the repaired rows')
+  console.log('Stale tab with the minor off: MINOR rows inactive with marks, minor switch still reaches them')
+}
+
+// 19. M1 details: merging old minor rows into existing MINOR rows, reappeared settings, failed writes.
+{
+  const lw55 = varied(row('LW2055', 'Old minor course A', 3), 2)
+  const lw32 = varied(row('LW2032', 'Old minor course B', 3), 3)
+  const base = () => store.loadSemesterCourses('sem3', undefined, true).filter(c => !isMinorCode('sem3', c.courseCode))
+  // blank MINOR1 takes the old marks; marked MINOR1 is kept and the marked old row stays; a blank old row is dropped
+  seedDeployed(); store.migrateStorage()
+  localStorage.setItem(SHARED, JSON.stringify([...base(), row('MINOR1', 'Minor Course 1', 3), lw55, varied(row('MINOR2', 'Minor Course 2', 3), 8), lw32, row('LW2055', 'Old minor course A', 3)]))
+  store.migrateStorage()
+  let list = JSON.parse(localStorage.getItem(SHARED))
+  const m1 = list.filter(c => c.courseCode === 'MINOR1')
+  assert.equal(m1.length, 1, 'one MINOR1 row')
+  assert.deepEqual(marksOf(m1[0]).slice(1), marksOf(lw55).slice(1), 'blank MINOR1 took the old marks')
+  assert.equal(list.filter(c => c.courseCode === 'MINOR2').length, 1)
+  assert.equal(list.find(c => c.courseCode === 'MINOR2').totalMarks, varied(row('X', 'x', 3), 8).totalMarks, 'marked MINOR2 kept')
+  assert.equal(list.filter(c => c.courseCode === 'LW2032').length, 1, 'both marked: old row left as is')
+  assert.equal(list.filter(c => c.courseCode === 'LW2055').length, 0, 'blank old row dropped')
+  // reappeared old minors setting updates the switch and is removed
+  localStorage.setItem(MINOR, 'false')
+  localStorage.setItem('sgpa_minors_v1', '["crim"]')
+  localStorage.setItem('sgpa_major_v1', '{"id":"aiml"}')
+  store.migrateStorage()
+  assert.equal(localStorage.getItem(MINOR), 'true')
+  assert.equal(localStorage.getItem('sgpa_minors_v1'), null)
+  assert.equal(localStorage.getItem('sgpa_major_v1'), null)
+  assert.ok([...mem.keys()].some(k => k.startsWith('sgpa_minors_v1_stale_')))
+  localStorage.setItem('sgpa_minors_v1', '[]')
+  store.migrateStorage()
+  assert.equal(localStorage.getItem(MINOR), 'false')
+  // MAJOR present but blank: filled from a reappeared key; MAJOR with marks is left alone
+  seedDeployed(); store.migrateStorage()
+  const blankMajor = store.loadSemesterCourses('sem3', undefined, true).map(c => (c.courseCode === 'MAJOR' ? row('MAJOR', 'Major Course', 3) : c))
+  store.saveSemesterCourses('sem3', undefined, blankMajor)
+  const aiml = varied(row('CS2227', 'x', 3), 4)
+  localStorage.setItem('sgpa_calc_v2_sem3_major_aiml', JSON.stringify([aiml]))
+  store.migrateStorage()
+  const filled = store.loadSemesterCourses('sem3', undefined, true).find(c => c.courseCode === 'MAJOR')
+  assert.equal(filled.totalMarks, aiml.totalMarks, 'blank MAJOR filled from the reappeared key')
+  assert.equal(filled.id, blankMajor.find(c => c.courseCode === 'MAJOR').id, 'row identity kept')
+  localStorage.setItem('sgpa_calc_v2_sem3_major_ds', JSON.stringify([varied(row('CS2231', 'x', 3), 0)]))
+  store.migrateStorage()
+  assert.equal(store.loadSemesterCourses('sem3', undefined, true).find(c => c.courseCode === 'MAJOR').totalMarks, aiml.totalMarks, 'MAJOR with marks left alone')
+  // failed write: nothing removed, next load repairs
+  const fs = seedDeployed(); store.migrateStorage()
+  const s = fs.shared
+  localStorage.setItem(SHARED, JSON.stringify(s)) // stale tab
+  localStorage.setItem('sgpa_calc_v2_sem3_major_ds', JSON.stringify([fs.majors.ds]))
+  failWrite = k => k === SHARED
+  store.migrateStorage()
+  assert.ok(localStorage.getItem('sgpa_calc_v2_sem3_major_ds'), 'failed write: per-major key kept')
+  assert.equal(localStorage.getItem(SHARED), JSON.stringify(s))
+  failWrite = () => false
+  store.migrateStorage()
+  assert.equal(localStorage.getItem('sgpa_calc_v2_sem3_major_ds'), null)
+  assert.ok(JSON.parse(localStorage.getItem(SHARED)).some(c => c.courseCode === 'MAJOR'))
+  console.log('Stale repair: blank MINOR row takes old marks, both marked keeps both, blank old row dropped; old settings applied and removed; blank MAJOR filled; failed write retried')
+}
+
+// 20. Old CSV exports: retired Sem 3 codes map to the generic rows on import.
+{
+  const mapped = store.mapRetiredSem3Codes([{ courseCode: 'LW2055', courseName: 'a', credits: 3 }, { courseCode: 'lw2032', courseName: 'b', credits: 3 },
+    { courseCode: 'CS2231', courseName: 'c', credits: 3 }, { courseCode: 'CS2227', courseName: 'd', credits: 3 }, { courseCode: 'CS2806', courseName: 'Calculus', credits: 2 }])
+  assert.deepEqual(codes(mapped), ['MINOR1', 'MINOR2', 'MAJOR', 'MAJOR', 'CS2806'])
+  assert.deepEqual(mapped.map(c => c.courseName), ['Minor Course 1', 'Minor Course 2', 'Major Course', 'Major Course', 'Calculus'])
+  const fitted = syncMinorCourses(dedupeByCode(mapped.map(store.blankCourse)), 'sem3', true, store.blankCourse)
+  assert.deepEqual(codes(fitted), ['MINOR1', 'MINOR2', 'MAJOR', 'CS2806'], 'one MAJOR row, no extra blank minor rows')
+  console.log('CSV import: LW2055/LW2032 -> MINOR1/MINOR2, CS2227/CS2231/CS2405/CS2500 -> MAJOR (one row)')
+}
 
 // Field-level fill: the winner's blank fields come from the other copy, nothing filled is cleared.
 const merged = mergeByCode([enrichCourse({ courseCode: 'X', credits: 3, cie1Marks: 10, cie2Marks: 12, cie3Marks: 12, seeMarks: null })],
