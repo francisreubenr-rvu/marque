@@ -86,7 +86,7 @@ export default function Header({ activeTab, setActiveTab, selection, sgpa, onSwi
               onMouseEnter={e => e.currentTarget.style.background='rgba(241,180,151,.18)'}
               onMouseLeave={e => e.currentTarget.style.background='rgba(241,180,151,.08)'}
             >
-              {selection.semester.replace('sem','S')}·{selection.divide}
+              {selection.semester.replace('sem','S')}{selection.divide ? `·${selection.divide}` : ''}
             </RippleBtn>
           )}
         </div>

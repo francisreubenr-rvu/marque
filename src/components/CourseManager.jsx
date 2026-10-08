@@ -283,8 +283,8 @@ export default function CourseManager({ courses, onUpdate, onAdd, onDelete, comp
   }, [onDelete, toast])
 
   const handleAdd = useCallback((data) => {
-    // onAdd returns false when the course was routed to another major instead of added here
-    if (onAdd(data) !== false) toast('Course added', 'success')
+    onAdd(data)
+    toast('Course added', 'success')
   }, [onAdd, toast])
 
   return (

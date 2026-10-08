@@ -1,12 +1,13 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { MAJORS, MINORS } from '../utils/constants'
-import { courseTemplate, totalCredits, isMajorSemester } from '../utils/semesterTemplates'
+import { MINOR_COURSES } from '../utils/constants'
+import { totalCredits, isCommonSemester, activeCourses } from '../utils/semesterTemplates'
+import { loadSemesterCourses } from '../utils/semesterStore'
 
 // ── Planet data (real-scaled orbits, sizes, 3× faster speeds) ────────────
 const SOLAR = [
   { id:'mercury', name:'Mercury', sem:'sem1', label:'Semester 1', orbit:70,  size:5,  speed:0.28,  color:'#B4B4B4', glow:'rgba(200,200,200,', grad:[[0,'#D0D0D0'],[0.6,'#888'],[1,'#555']], bands:null, rings:false, ringParticles:false, moons:[], available:true, completed:true, comingSoon:false, fact:'Fastest planet. No atmosphere. Extreme temperature swings.', divides:['EEX','ES'], noiseSeed:11 },
   { id:'venus',   name:'Venus',   sem:'sem2', label:'Semester 2', orbit:105, size:8,  speed:0.18,  color:'#E8C484', glow:'rgba(255,210,120,', grad:[[0,'#FFDF9A'],[0.6,'#C89040'],[1,'#A07020']], bands:null, rings:false, ringParticles:false, moons:[], available:true, completed:false, comingSoon:false, fact:'Hottest planet. Shrouded in toxic clouds. Rotates retrograde.', divides:['EEX','ES'], noiseSeed:22 },
-  { id:'earth',   name:'Earth',   sem:'sem3', label:'Semester 3', orbit:153, size:10, speed:0.12,  color:'#4B7BE5', glow:'rgba(100,155,255,', grad:[[0,'#6B9BFF'],[0.45,'#2B55C8'],[1,'#102888']], bands:null, rings:false, ringParticles:false, moons:[{name:'Moon',orbit:22,size:3.2,speed:0.058,color:'#CCCCCC',glow:'rgba(200,200,200,'},{name:'ISS',orbit:30,size:1.8,speed:0.32,color:'#C8D6E2',glow:'rgba(200,213,226,',shape:'iss',fact:'International Space Station · 408 km altitude · 7.66 km/s · 16 sunrises per day'},{name:'Hubble',orbit:38,size:1.6,speed:0.24,color:'#B4C4D4',glow:'rgba(180,196,212,',shape:'telescope',fact:'Hubble Space Telescope · 547 km altitude · launched 1990 · over 1.4 million observations'},{name:'GPS-IIF',orbit:46,size:1.4,speed:0.14,color:'#A8B8C8',glow:'rgba(165,185,200,',shape:'satellite',fact:'GPS Satellite · MEO orbit 20,200 km · constellation of 31 active satellites · sub-metre accuracy'}], available:true, comingSoon:false, fact:'Our home. Year 2 specialisations begin here: one major course, shared core, optional minor.', divides:null, noiseSeed:33 },
+  { id:'earth',   name:'Earth',   sem:'sem3', label:'Semester 3', orbit:153, size:10, speed:0.12,  color:'#4B7BE5', glow:'rgba(100,155,255,', grad:[[0,'#6B9BFF'],[0.45,'#2B55C8'],[1,'#102888']], bands:null, rings:false, ringParticles:false, moons:[{name:'Moon',orbit:22,size:3.2,speed:0.058,color:'#CCCCCC',glow:'rgba(200,200,200,'},{name:'ISS',orbit:30,size:1.8,speed:0.32,color:'#C8D6E2',glow:'rgba(200,213,226,',shape:'iss',fact:'International Space Station · 408 km altitude · 7.66 km/s · 16 sunrises per day'},{name:'Hubble',orbit:38,size:1.6,speed:0.24,color:'#B4C4D4',glow:'rgba(180,196,212,',shape:'telescope',fact:'Hubble Space Telescope · 547 km altitude · launched 1990 · over 1.4 million observations'},{name:'GPS-IIF',orbit:46,size:1.4,speed:0.14,color:'#A8B8C8',glow:'rgba(165,185,200,',shape:'satellite',fact:'GPS Satellite · MEO orbit 20,200 km · constellation of 31 active satellites · sub-metre accuracy'}], available:true, comingSoon:false, fact:'Our home. Year 2 begins here: shared core, one major course, a university elective and an optional minor.', divides:null, noiseSeed:33 },
   { id:'mars',    name:'Mars',    sem:'sem4', label:'Semester 4', orbit:198, size:6,  speed:0.08,  color:'#C1440E', glow:'rgba(220,80,30,',   grad:[[0,'#E06640'],[0.6,'#A03010'],[1,'#601000']], bands:null, rings:false, ringParticles:false, moons:[{name:'Phobos',orbit:19,size:2.5,speed:0.09,color:'#AAA',glow:'rgba(170,170,170,'},{name:'Deimos',orbit:29,size:2,speed:0.053,color:'#999',glow:'rgba(150,150,150,'}], available:true, comingSoon:true, fact:'The Red Planet. Home to Olympus Mons, tallest known volcano.', divides:['EEX','ES'], noiseSeed:44 },
   { id:'jupiter', name:'Jupiter', sem:'sem5', label:'Semester 5', orbit:276, size:22, speed:0.05,  color:'#C88B3A', glow:'rgba(220,160,80,',  grad:null, bands:['#C8883A','#E4B86A','#A86020','#D89850','#F0CC80','#A86020','#C8883A','#E4B86A','#B87030'], rings:false, ringParticles:false, moons:[{name:'Io',orbit:35,size:3.5,speed:0.068,color:'#FFD700',glow:'rgba(255,215,0,'},{name:'Europa',orbit:46,size:3,speed:0.048,color:'#D4C8A0',glow:'rgba(210,200,160,'},{name:'Ganymede',orbit:58,size:4,speed:0.033,color:'#A89060',glow:'rgba(170,145,100,'},{name:'Callisto',orbit:71,size:3.5,speed:0.024,color:'#887060',glow:'rgba(140,115,100,'}], available:true, comingSoon:true, fact:"King of planets. Great Red Spot: a storm older than recorded history.", divides:['EEX','ES'], noiseSeed:55 },
   { id:'saturn',  name:'Saturn',  sem:'sem6', label:'Semester 6', orbit:382, size:18, speed:0.032, color:'#E4D191', glow:'rgba(240,220,130,', grad:null, bands:['#D8C070','#F0E090','#C8A850','#E8D880','#F0E090','#C8A850','#D8C070','#E8D060'], rings:true, ringParticles:false, moons:[{name:'Titan',orbit:40,size:4,speed:0.038,color:'#E8A020',glow:'rgba(230,160,30,'},{name:'Enceladus',orbit:52,size:2.5,speed:0.052,color:'#EEEEFF',glow:'rgba(220,220,255,'},{name:'Rhea',orbit:64,size:3,speed:0.033,color:'#CCCCCC',glow:'rgba(200,200,200,'}], available:true, comingSoon:true, fact:'The Ringed Beauty. Rings span 282,000 km — mostly ice.', divides:['EEX','ES'], noiseSeed:66 },
@@ -706,13 +707,14 @@ function GalaxyNav({ active, onChange }) {
 }
 
 // ── Planet Card (compact floating panel) ─────────────────────────────────
-function PlanetCard({ planet, onRoute, onDismiss, savedMajor, onChangeMajor, minors = [], onToggleMinor }) {
+const MINOR_COLOR = '#C9A0FF'
+
+function PlanetCard({ planet, onRoute, onDismiss, minorOn = false, onToggleMinor }) {
   if (!planet) return null
-  const majorSem  = isMajorSemester(planet.sem)
-  const majorData = majorSem && savedMajor ? MAJORS.find(m => m.id === savedMajor.id) : null
-  const live      = majorSem && !planet.comingSoon
-  const semMinors = live ? MINORS.filter(m => m.courses?.[planet.sem]?.length) : []
-  const load      = live && majorData ? courseTemplate(planet.sem, majorData.id, minors) : null
+  const live      = isCommonSemester(planet.sem) && !planet.comingSoon
+  const minorRows = live ? (MINOR_COURSES[planet.sem] ?? []) : []
+  // Course load of the saved list (deleted and added rows included), minor switch applied.
+  const load      = live ? activeCourses(loadSemesterCourses(planet.sem, null, minorOn)) : null
   return (
     <div style={{
       position: 'fixed', bottom: 72, left: '50%', transform: 'translateX(-50%)',
@@ -749,53 +751,24 @@ function PlanetCard({ planet, onRoute, onDismiss, savedMajor, onChangeMajor, min
         {planet.fact}
       </div>
 
-      {/* Major row: only for sem3+ */}
-      {majorSem && (
-        <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:14, paddingBottom:12, borderBottom:'1px solid rgba(255,255,255,.07)' }}>
-          <div style={{ display:'flex', alignItems:'center', gap:8 }}>
-            {majorData ? (
-              <>
-                <div style={{ width:6, height:6, borderRadius:'50%', background:majorData.color, boxShadow:`0 0 8px ${majorData.color}`, flexShrink:0 }} />
-                <span style={{ fontFamily:"'DM Mono',monospace", fontSize:10, color:'rgba(255,255,255,.55)' }}>{majorData.label}</span>
-              </>
-            ) : (
-              <span style={{ fontFamily:"'DM Mono',monospace", fontSize:10, color:'rgba(241,180,151,.5)' }}>No major selected</span>
-            )}
-          </div>
-          <button onClick={onChangeMajor}
-            style={{ background:'none', border:'none', fontFamily:"'DM Mono',monospace", fontSize:9, letterSpacing:'1px', textTransform:'uppercase', color:'rgba(241,180,151,.6)', cursor:'pointer', padding:'2px 0', transition:'color .15s' }}
-            onMouseEnter={e => e.currentTarget.style.color='#F1B497'}
-            onMouseLeave={e => e.currentTarget.style.color='rgba(241,180,151,.6)'}>
-            {majorData ? 'Change ↗' : 'Select →'}
+      {/* Minor switch: optional, adds the minor courses to this semester */}
+      {minorRows.length > 0 && (
+        <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', gap:8, marginBottom:14, paddingBottom:12, borderBottom:'1px solid rgba(255,255,255,.07)' }}>
+          <span style={{ fontFamily:"'DM Mono',monospace", fontSize:8, letterSpacing:'2px', color:'rgba(255,255,255,.28)', textTransform:'uppercase' }}>Minor</span>
+          <button type="button" aria-pressed={minorOn} onClick={() => onToggleMinor?.()}
+            title={minorRows.map(c => `${c.courseCode} ${c.courseName} (${c.credits} cr)`).join(' + ')}
+            style={{ display:'flex', alignItems:'center', gap:6, padding:'4px 10px', cursor:'pointer', fontFamily:"'DM Mono',monospace", fontSize:10,
+              background: minorOn ? `${MINOR_COLOR}18` : 'transparent',
+              color: minorOn ? MINOR_COLOR : 'rgba(255,255,255,.4)',
+              border: `1px ${minorOn ? 'solid' : 'dashed'} ${minorOn ? MINOR_COLOR + '55' : 'rgba(255,255,255,.18)'}`,
+              transition:'color .15s, border-color .15s, background .15s' }}>
+            <span style={{ width:6, height:6, borderRadius:'50%', background: minorOn ? MINOR_COLOR : 'transparent', border:`1px solid ${minorOn ? MINOR_COLOR : 'rgba(255,255,255,.3)'}`, boxShadow: minorOn ? `0 0 8px ${MINOR_COLOR}` : 'none', transition:'all .15s' }} />
+            {minorOn ? 'Taking a minor' : 'No minor'}
           </button>
         </div>
       )}
 
-      {/* Minor chips: optional streams that add courses to this semester */}
-      {semMinors.length > 0 && (
-        <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', gap:8, marginBottom:14, paddingBottom:12, borderBottom:'1px solid rgba(255,255,255,.07)' }}>
-          <span style={{ fontFamily:"'DM Mono',monospace", fontSize:8, letterSpacing:'2px', color:'rgba(255,255,255,.28)', textTransform:'uppercase' }}>Minor</span>
-          <div style={{ display:'flex', flexWrap:'wrap', gap:6, justifyContent:'flex-end' }}>
-            {semMinors.map(m => {
-              const on = minors.includes(m.id)
-              return (
-                <button key={m.id} type="button" aria-pressed={on} onClick={() => onToggleMinor?.(m.id)}
-                  title={m.courses[planet.sem].map(c => `${c.courseCode} ${c.courseName} (${c.credits} cr)`).join(' + ')}
-                  style={{ display:'flex', alignItems:'center', gap:6, padding:'4px 10px', cursor:'pointer', fontFamily:"'DM Mono',monospace", fontSize:10,
-                    background: on ? `${m.color}18` : 'transparent',
-                    color: on ? m.color : 'rgba(255,255,255,.4)',
-                    border: `1px ${on ? 'solid' : 'dashed'} ${on ? m.color + '55' : 'rgba(255,255,255,.18)'}`,
-                    transition:'color .15s, border-color .15s, background .15s' }}>
-                  <span style={{ width:6, height:6, borderRadius:'50%', background: on ? m.color : 'transparent', border:`1px solid ${on ? m.color : 'rgba(255,255,255,.3)'}`, boxShadow: on ? `0 0 8px ${m.color}` : 'none', transition:'all .15s' }} />
-                  {m.label}
-                </button>
-              )
-            })}
-          </div>
-        </div>
-      )}
-
-      {/* Course load preview for the chosen major + minors */}
+      {/* Course load preview for the saved list */}
       {load && (
         <div style={{ display:'flex', alignItems:'baseline', justifyContent:'space-between', marginBottom:14, fontFamily:"'DM Mono',monospace" }}>
           <span style={{ fontSize:8, letterSpacing:'2px', color:'rgba(255,255,255,.28)', textTransform:'uppercase' }}>Course load</span>
@@ -818,11 +791,11 @@ function PlanetCard({ planet, onRoute, onDismiss, savedMajor, onChangeMajor, min
               </button>
             ))
           ) : (
-            <button onClick={() => onRoute(planet.sem, majorSem ? savedMajor?.id : 'EEX')}
+            <button onClick={() => onRoute(planet.sem, 'EEX')}
               style={{ flex:1, padding:'10px 0', background:`${planet.glow}0.07)`, border:`1px solid ${planet.glow}0.32)`, color:'#F5EFEB', fontFamily:"'Hanken Grotesk',sans-serif", fontSize:12, letterSpacing:'.5px', cursor:'pointer', transition:'background .15s' }}
               onMouseEnter={e=>e.currentTarget.style.background=`${planet.glow}0.2)`}
               onMouseLeave={e=>e.currentTarget.style.background=`${planet.glow}0.07)`}>
-              {majorSem && !majorData ? 'Choose major ↗' : 'Enter ↗'}
+              Enter ↗
             </button>
           )}
         </div>
@@ -861,7 +834,7 @@ function SatCard({ satellite, onDismiss }) {
 }
 
 // ── Space Selection Screen ────────────────────────────────────────────────
-export default function SpaceSelectionScreen({ onSelect, onClose, savedMajor, onSetMajor, minors, onToggleMinor }) {
+export default function SpaceSelectionScreen({ onSelect, onClose, minorOn, onToggleMinor }) {
   const [selectedPlanet,setSelectedPlanet]=useState(null)
   const [selectedSatellite,setSelectedSatellite]=useState(null)
   const [zoomedId,setZoomedId]=useState(null)
@@ -880,11 +853,7 @@ export default function SpaceSelectionScreen({ onSelect, onClose, savedMajor, on
 
   const handleDismiss=()=>{ setSelectedPlanet(null); setZoomedId(null); setSelectedSatellite(null) }
 
-  const handleChangeMajor=()=>{ onSetMajor?.({}) }
-
   const handleRoute=(sem,divide)=>{
-    const planet=SOLAR.find(p=>p.sem===sem)
-    if(planet && isMajorSemester(planet.sem) && !savedMajor){ onSetMajor?.({ pendingSem:sem, pendingDivide:divide }); return }
     warpRef.current={ active:true, progress:0, called:false, callback:()=>{ setSelectedPlanet(null); setZoomedId(null); onSelect(sem,divide) } }
     const tick=()=>{ warpRef.current.progress=Math.min(1,warpRef.current.progress+.022); if(warpRef.current.progress<1) requestAnimationFrame(tick) }
     requestAnimationFrame(tick)
@@ -916,7 +885,7 @@ export default function SpaceSelectionScreen({ onSelect, onClose, savedMajor, on
 
       {!selectedPlanet&&!selectedSatellite&&(<div style={{ position:'absolute',bottom:70,left:'50%',transform:'translateX(-50%)',fontFamily:"'DM Mono',monospace",fontSize:9,letterSpacing:'2px',color:'rgba(255,255,255,.22)',textTransform:'uppercase',zIndex:10,whiteSpace:'nowrap',animation:'fadeUp .6s ease 1.2s both' }}>Click a planet to select · hover asteroids to target</div>)}
 
-      <PlanetCard planet={selectedPlanet} onRoute={handleRoute} onDismiss={handleDismiss} savedMajor={savedMajor} onChangeMajor={handleChangeMajor} minors={minors} onToggleMinor={onToggleMinor} />
+      <PlanetCard planet={selectedPlanet} onRoute={handleRoute} onDismiss={handleDismiss} minorOn={minorOn} onToggleMinor={onToggleMinor} />
       <SatCard satellite={selectedSatellite} onDismiss={()=>setSelectedSatellite(null)} />
 
       <GalaxyNav active={activeGalaxy} onChange={setActiveGalaxy} />

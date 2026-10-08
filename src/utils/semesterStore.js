@@ -2,21 +2,39 @@
 // credit check (scripts/check-sem3.mjs) can drive it in Node with a fake localStorage.
 //
 // Key layout:
-//   Sem 1/2:          sgpa_calc_v2_<sem>_<divide>         (unchanged)
-//   Major semesters:  sgpa_calc_v2_<sem>_shared           core, minor and custom courses, one copy for every major
-//                     sgpa_calc_v2_<sem>_major_<majorId>  that major's specialization course(s)
+//   Sem 1/2:            sgpa_calc_v2_<sem>_<divide>   (unchanged)
+//   Common semesters:   sgpa_calc_v2_<sem>_shared     one list for every student (Sem 3)
+//
+// Older layouts handled by the migrations at the bottom of this file:
+//   sgpa_calc_v2_sem3_<major>         first Sem 3 layout, whole list per major
+//   sgpa_calc_v2_sem3_major_<major>   per-major specialization course (1d0510d and earlier)
+//   sgpa_major_v1, sgpa_minors_v1     saved major and named-minor settings
 import { enrichCourse } from './calculations.js'
-import { LS_KEY_PREFIX, LS_SELECTION, MAJORS, SEMESTERS, CORE_ADDED_LATER } from './constants.js'
-import { loadMajor, loadMinors } from './localStorage.js'
+import { LS_KEY_PREFIX, LS_SELECTION, LS_MINOR, SEMESTERS, CORE_ADDED_LATER, SEM3_CORE_COURSES, SEM3_MAJOR_COURSE, MINOR_COURSES } from './constants.js'
+import { loadMinorOn } from './localStorage.js'
 import {
-  courseTemplate, isMajorSemester, isMajorId, splitMajorCourses, mergeMajorCourses,
-  syncMinorCourses, inferMinors, majorIdForCode, mergeByCode, dedupeByCode,
+  courseTemplate, isCommonSemester, syncMinorCourses, inferMinorOn, mergeByCode, dedupeByCode,
+  filledCount, hasMarks, mergeCourse,
 } from './semesterTemplates.js'
 
 // Set once the first-layout migration has run (value: ISO time of the first run).
 export const LS_MAJOR_SEM_MIGRATED = 'sgpa_major_sem_layout_v2'
 // "<sem>:<code>" entries of CORE_ADDED_LATER already appended to saved lists.
 export const LS_CORE_ADDED = 'sgpa_core_added_v1'
+// Set once Sem 3 has moved to generic major and minor slots (value: ISO time).
+export const LS_GENERIC_SLOTS_MIGRATED = 'sgpa_sem3_generic_slots_v3'
+export const BACKUP_SUFFIX_V3 = '_premigration_v3'
+
+// Retired settings and codes, read only by the migrations below.
+const LEGACY_MAJOR_KEY  = 'sgpa_major_v1'
+const LEGACY_MINORS_KEY = 'sgpa_minors_v1'
+const LEGACY_MINOR_IDS  = ['crim']
+const LEGACY_SEM3_MAJOR_CODES = { aiml: 'CS2227', ds: 'CS2231', cyber: 'CS2405', cloud: 'CS2500' }
+const LEGACY_MAJOR_IDS  = Object.keys(LEGACY_SEM3_MAJOR_CODES)
+const LEGACY_SEM3_MINOR_CODES = { LW2055: 'MINOR1', LW2032: 'MINOR2' }
+const legacyMajorForCode = code => LEGACY_MAJOR_IDS.find(m => LEGACY_SEM3_MAJOR_CODES[m] === code) ?? null
+const isCourse = c => c && typeof c === 'object' && typeof c.courseCode === 'string'
+const normCode = code => (typeof code === 'string' ? code.trim().toUpperCase() : '')
 
 export function courseKey(semester, divide) {
   return `${LS_KEY_PREFIX}_${semester}_${divide}`
@@ -24,6 +42,7 @@ export function courseKey(semester, divide) {
 export function sharedKey(semester) {
   return `${LS_KEY_PREFIX}_${semester}_shared`
 }
+// Retired per-major key, kept for the migrations.
 export function majorKey(semester, majorId) {
   return `${LS_KEY_PREFIX}_${semester}_major_${majorId}`
 }
@@ -50,7 +69,7 @@ export function loadCoursesForDivide(semester, divide) {
   return null
 }
 
-// Reader for the major semester keys: null when absent, not an array or empty
+// Reader for the common semester keys: null when absent, not an array or empty
 // (same fallback to the template as Sem 1/2), otherwise the valid entries only.
 function readCourseList(key) {
   try {
@@ -65,76 +84,126 @@ function readCourseList(key) {
 function writeList(key, list) {
   try { localStorage.setItem(key, JSON.stringify(list)) } catch {}
 }
+function readJson(key) {
+  try { return JSON.parse(localStorage.getItem(key)) } catch { return null }
+}
 
 // Courses for a selection, from storage or the template. Read only: nothing is written.
-// For major semesters divide is the major id on screen; minor courses are flagged, never dropped.
-export function loadSemesterCourses(semester, divide, minorIds = []) {
-  if (!isMajorSemester(semester)) {
+// Common semesters ignore divide; minor courses are flagged by the switch, never dropped.
+export function loadSemesterCourses(semester, divide, minorOn = false) {
+  if (!isCommonSemester(semester)) {
     return loadCoursesForDivide(semester, divide) ?? makeCoursesFromTemplate(courseTemplate(semester, divide))
   }
-  const tpl = splitMajorCourses(courseTemplate(semester, divide, minorIds), semester)
-  // Only shared codes come from the shared list and only this major's code from its key.
-  const own = (list, owner) => list?.filter(c => majorIdForCode(semester, c.courseCode) === owner) ?? null
-  const sharedStored = own(readCourseList(sharedKey(semester)), null)
-  const majorStored  = own(readCourseList(majorKey(semester, divide)), divide)
-  const shared = sharedStored?.length ? sharedStored : makeCoursesFromTemplate(tpl.shared)
-  const major  = majorStored?.length  ? majorStored  : makeCoursesFromTemplate(tpl.byMajor[divide] ?? [])
-  return syncMinorCourses(mergeMajorCourses(dedupeByCode(shared), major), semester, minorIds, blankCourse)
+  const stored = readCourseList(sharedKey(semester))
+  const list = stored ? dedupeByCode(stored) : makeCoursesFromTemplate(courseTemplate(semester, divide, minorOn))
+  return syncMinorCourses(list, semester, minorOn, blankCourse)
 }
 
 export function saveSemesterCourses(semester, divide, courses) {
-  if (!isMajorSemester(semester)) {
-    writeList(courseKey(semester, divide), courses)
-    return
-  }
-  if (!isMajorId(divide)) return // never write under an unknown major
-  const { shared, byMajor } = splitMajorCourses(courses, semester)
-  writeList(sharedKey(semester), dedupeByCode(shared))
-  writeList(majorKey(semester, divide), dedupeByCode(byMajor[divide] ?? []))
-  // Another major's course that reached this list is merged into that major's own key.
-  for (const [m, list] of Object.entries(byMajor)) {
-    if (m !== divide) writeList(majorKey(semester, m), mergeByCode(readCourseList(majorKey(semester, m)) ?? [], list, false))
-  }
+  if (!isCommonSemester(semester)) writeList(courseKey(semester, divide), courses)
+  else writeList(sharedKey(semester), dedupeByCode(courses))
 }
 
-// Store courses that belong to another major (typed or imported on this screen) under
-// that major's key, keeping whichever copy has more assessments filled.
-export function routeForeignMajorCourses(semester, divide, courses) {
-  if (!isMajorSemester(semester)) return { kept: courses, routed: [] }
-  const kept = [], routed = []
-  for (const c of courses) {
-    const owner = majorIdForCode(semester, c.courseCode)
-    if (owner && owner !== divide) {
-      writeList(majorKey(semester, owner), mergeByCode(readCourseList(majorKey(semester, owner)) ?? [], [c], false))
-      routed.push({ course: c, majorId: owner })
-    } else kept.push(c)
-  }
-  return { kept, routed }
-}
-
-// Reset: Sem 1/2 clear their divide; major semesters clear the shared list and this major's course.
+// Reset: Sem 1/2 clear their divide; common semesters clear their one list.
 export function clearSemesterCourses(semester, divide) {
   try {
-    if (!isMajorSemester(semester)) { localStorage.removeItem(courseKey(semester, divide)); return }
-    localStorage.removeItem(sharedKey(semester))
-    if (isMajorId(divide)) localStorage.removeItem(majorKey(semester, divide))
+    localStorage.removeItem(isCommonSemester(semester) ? sharedKey(semester) : courseKey(semester, divide))
   } catch {}
 }
 
-// Minor choice: the stored setting when it is valid, otherwise infer from saved minor marks.
-export function resolveMinors() {
-  const stored = loadMinors()
-  if (stored) return stored
-  return inferMinors(SEMESTERS.filter(s => s.majorSem).map(s => [s.id, readCourseList(sharedKey(s.id)) ?? []]))
+// Old named-minor setting: a clean array of known ids ([] is an explicit off), or null.
+function normalizeLegacyMinors(value) {
+  if (!Array.isArray(value)) return null
+  const ids = value.map(v => (typeof v === 'string' ? v.trim().toLowerCase() : null))
+  return ids.every(v => LEGACY_MINOR_IDS.includes(v)) ? [...new Set(ids)] : null
 }
 
-// A major semester selection always names a known major; otherwise fall back to the
-// saved major, or drop the selection so the picker shows again. Sem 1/2 pass through.
-export function normalizeSelection(sel, savedMajorId) {
+// Minor switch: the stored setting when it is valid, otherwise infer from saved minor
+// marks. Until the Sem 3 migration has run, the old setting and codes count as well.
+export function resolveMinorOn() {
+  const stored = loadMinorOn()
+  if (stored !== null) return stored
+  const legacy = normalizeLegacyMinors(readJson(LEGACY_MINORS_KEY))
+  if (legacy) return legacy.length > 0
+  const lists = SEMESTERS.filter(s => s.common).map(s => [s.id, readCourseList(sharedKey(s.id)) ?? []])
+  return inferMinorOn(lists) || lists.some(([, cs]) => cs.some(c => LEGACY_SEM3_MINOR_CODES[c.courseCode] && hasMarks(c)))
+}
+
+// Common semester selections carry no divide. A saved selection for a semester that is
+// not live yet is dropped so the picker shows again. Sem 1/2 pass through.
+export function normalizeSelection(sel) {
   if (!sel || typeof sel !== 'object') return null
-  if (!isMajorSemester(sel.semester)) return sel
-  if (isMajorId(sel.divide)) return sel
-  return isMajorId(savedMajorId) ? { ...sel, divide: savedMajorId } : null
+  if (!isCommonSemester(sel.semester)) return sel
+  if (SEMESTERS.find(s => s.id === sel.semester)?.comingSoon) return null
+  return { semester: sel.semester }
+}
+
+// All storage migrations, in order. App runs this once per load before rendering.
+export function migrateStorage() {
+  let genericDone = false
+  try { genericDone = localStorage.getItem(LS_GENERIC_SLOTS_MIGRATED) !== null } catch {}
+  // The per-major layout migration knows the old specialization codes, so it must not
+  // run once Sem 3 is generic (it would move a hand-typed CS2231 row out of the list).
+  if (!genericDone) migrateMajorSemesterStorage()
+  else addLaterCoreCourses()
+  migrateGenericSem3Slots()
+  repairStaleSem3()
+}
+
+// The major the 1d0510d app had on screen: the Sem 3 selection's major, else the saved
+// major, else ds.
+function resolveLegacyMajor() {
+  const sel = readJson(LS_SELECTION)
+  const savedMajor = readJson(LEGACY_MAJOR_KEY)?.id
+  if (sel && typeof sel === 'object' && isCommonSemester(sel.semester) && LEGACY_MAJOR_IDS.includes(sel.divide)) return sel.divide
+  return LEGACY_MAJOR_IDS.includes(savedMajor) ? savedMajor : 'ds'
+}
+
+// The stored specialization course of one old major (its own code only), the most
+// complete copy, or null.
+function legacyMajorCourse(id) {
+  const raw = readJson(majorKey('sem3', id))
+  return (Array.isArray(raw) ? raw : [])
+    .filter(c => isCourse(c) && c.courseCode === LEGACY_SEM3_MAJOR_CODES[id])
+    .reduce((best, c) => (best && filledCount(best) >= filledCount(c) ? best : c), null)
+}
+
+// Which old per-major course becomes the MAJOR row: the resolved major's course when it
+// has marks, otherwise the most complete course of another major (ties go to the first
+// in aiml, ds, cyber, cloud order), otherwise the resolved major's course (may be blank or null).
+function pickLegacyMajorSource(resolvedId) {
+  const own = legacyMajorCourse(resolvedId)
+  if (own && hasMarks(own)) return own
+  let best = null
+  for (const id of LEGACY_MAJOR_IDS) {
+    if (id === resolvedId) continue
+    const c = legacyMajorCourse(id)
+    if (c && hasMarks(c) && (!best || filledCount(c) > filledCount(best))) best = c
+  }
+  return best ?? own
+}
+
+const toMajorRow = src => (src
+  ? { ...src, courseCode: SEM3_MAJOR_COURSE.courseCode, courseName: SEM3_MAJOR_COURSE.courseName }
+  : blankCourse(SEM3_MAJOR_COURSE))
+
+// Ids of the courses kept in a key's _premigration_v3 backup. An old tab saving after the
+// migration replays its pre-deploy rows with these ids; rows added in the new build get new ids.
+function backupIds(key) {
+  const raw = readJson(key + BACKUP_SUFFIX_V3)
+  return new Set((Array.isArray(raw) ? raw : []).filter(c => isCourse(c) && c.id != null).map(c => c.id))
+}
+
+// Where a missing MAJOR row goes: after EE, else before UE, else after the last core row, else first.
+function majorInsertAt(list) {
+  const find = code => list.findIndex(c => isCourse(c) && normCode(c.courseCode) === code)
+  const ee = find('EE'), ue = find('UE')
+  if (ee >= 0) return ee + 1
+  if (ue >= 0) return ue
+  const core = new Set(SEM3_CORE_COURSES.map(c => c.courseCode))
+  let at = 0
+  list.forEach((c, i) => { if (isCourse(c) && core.has(normCode(c.courseCode))) at = i + 1 })
+  return at
 }
 
 // Move from the first sem3-unlock layout (whole list per major under
@@ -148,13 +217,14 @@ export function normalizeSelection(sel, savedMajorId) {
 // - new keys are written with setItem directly, so a failed write (quota) aborts the
 //   run before any old key is removed, and the next load retries;
 // - afterwards core courses added later (the University Elective) are appended once.
+// Old layouts only ever existed for Sem 3, the only live semester that had majors.
 export function migrateMajorSemesterStorage() {
   try {
-    const savedMajor = loadMajor()?.id
-    for (const sem of SEMESTERS.filter(s => s.majorSem)) {
+    const savedMajor = readJson(LEGACY_MAJOR_KEY)?.id
+    for (const sem of SEMESTERS.filter(s => s.id === 'sem3')) {
       const write = (key, list) => localStorage.setItem(key, JSON.stringify(list))
-      const legacy = MAJORS
-        .map(m => ({ id: m.id, key: courseKey(sem.id, m.id) }))
+      const legacy = LEGACY_MAJOR_IDS
+        .map(id => ({ id, key: courseKey(sem.id, id) }))
         .filter(l => localStorage.getItem(l.key) !== null)
         .map(l => ({ ...l, list: readCourseList(l.key) }))
         // the last saved major goes last, so it wins ties between old lists
@@ -162,8 +232,8 @@ export function migrateMajorSemesterStorage() {
 
       // Live lists, plus anything stored under the wrong key in them.
       const live = { shared: readCourseList(sharedKey(sem.id)) }
-      for (const m of MAJORS) live[m.id] = readCourseList(majorKey(sem.id, m.id))
-      const target = c => majorIdForCode(sem.id, c.courseCode) ?? 'shared'
+      for (const id of LEGACY_MAJOR_IDS) live[id] = readCourseList(majorKey(sem.id, id))
+      const target = c => legacyMajorForCode(c.courseCode) ?? 'shared'
       const next = {}, dirty = new Set()
       for (const [k, list] of Object.entries(live)) {
         if (!list) continue
@@ -215,7 +285,7 @@ export function addLaterCoreCourses() {
         const tag = `${sem}:${add.courseCode}`
         if (done.includes(tag)) continue
         // old per-major lists still present (migration failed, e.g. storage full): retry next load
-        if (MAJORS.some(m => localStorage.getItem(courseKey(sem, m.id)) !== null)) continue
+        if (LEGACY_MAJOR_IDS.some(id => localStorage.getItem(courseKey(sem, id)) !== null)) continue
         const key = sharedKey(sem)
         let stored = null
         try { stored = JSON.parse(localStorage.getItem(key)) } catch { stored = null }
@@ -223,7 +293,7 @@ export function addLaterCoreCourses() {
         const isCourse = c => c && typeof c === 'object' && typeof c.courseCode === 'string'
         // only extend a list with at least one valid course; a junk list falls back to the template, which has it
         if (Array.isArray(stored) && stored.some(isCourse) && !stored.some(c => isCourse(c) && norm(c.courseCode) === norm(add.courseCode))) {
-          const coreCodes = new Set(courseTemplate(sem, MAJORS[0].id, []).map(c => c.courseCode))
+          const coreCodes = new Set(courseTemplate(sem).map(c => c.courseCode))
           let at = stored.length
           for (let i = stored.length - 1; i >= 0; i--) if (coreCodes.has(stored[i]?.courseCode)) { at = i + 1; break }
           // setItem directly: if the write fails the tag is not recorded and the next load retries
@@ -235,6 +305,204 @@ export function addLaterCoreCourses() {
     }
     if (changed) localStorage.setItem(LS_CORE_ADDED, JSON.stringify(done))
   } catch {}
+}
+
+// Sem 3 moves to generic slots: the named minor rows become MINOR1 / MINOR2 and the
+// selected major's specialization course becomes one MAJOR row in the shared list.
+// Runs once (LS_GENERIC_SLOTS_MIGRATED), after the layout migration above:
+// - minor rows (LW2055, LW2032) are renamed in place: id, marks, credits and the
+//   inactive flag stay as stored, only code and name change;
+// - the MAJOR row takes the marks of the major the app had selected (the Sem 3
+//   selection's major, else the saved major, else ds); when that course is blank or
+//   missing, the most complete other major's course is used. It goes after EE (before UE);
+//   a list that already has a MAJOR row keeps it and gets no second one;
+// - the old minors setting becomes the new on/off switch (['crim'] is on, [] is off);
+// - every key that is changed or removed is first copied to <key>_premigration_v3
+//   (an existing backup is never overwritten), then new values are written, then the
+//   retired per-major keys and settings are removed, and only then is the flag set.
+//   Any failed write aborts the run without the flag, so the next load retries;
+// - custom rows, a deleted University Elective and every other row are left as stored;
+//   a junk saved list is left alone (the loader falls back to the template).
+export function migrateGenericSem3Slots() {
+  try {
+    if (localStorage.getItem(LS_GENERIC_SLOTS_MIGRATED) !== null) return
+    // the first-layout migration has not finished (e.g. storage full): retry next load
+    if (LEGACY_MAJOR_IDS.some(id => localStorage.getItem(courseKey('sem3', id)) !== null)) return
+
+    const norm = normCode
+    const sKey = sharedKey('sem3')
+    const rawShared = readJson(sKey)
+    const shared = Array.isArray(rawShared) && rawShared.some(isCourse) ? rawShared : null
+
+    // The major the app had on screen (or another major's marks when that one is blank).
+    const majorSource = pickLegacyMajorSource(resolveLegacyMajor())
+    const majorRow = toMajorRow(majorSource)
+
+    let next = null
+    if (shared) {
+      // rename the old minor rows in place
+      const minorTpl = code => MINOR_COURSES.sem3.find(m => m.courseCode === code)
+      let list = shared.map(c => {
+        const to = isCourse(c) ? LEGACY_SEM3_MINOR_CODES[c.courseCode] : null
+        return to ? { ...c, courseCode: to, courseName: minorTpl(to).courseName } : c
+      })
+      // a MINOR row typed by hand next to the old one: keep one row (the more complete copy)
+      for (const m of MINOR_COURSES.sem3) {
+        const idx = list.map((c, i) => (isCourse(c) && c.courseCode === m.courseCode ? i : -1)).filter(i => i >= 0)
+        if (idx.length < 2) continue
+        const [one] = dedupeByCode(idx.map(i => list[i]))
+        list = list.map((c, i) => (i === idx[0] ? one : c)).filter((_, i) => !idx.slice(1).includes(i))
+      }
+      // insert the MAJOR row unless the list already has one
+      if (!list.some(c => isCourse(c) && norm(c.courseCode) === SEM3_MAJOR_COURSE.courseCode)) {
+        const at = majorInsertAt(list)
+        list = [...list.slice(0, at), majorRow, ...list.slice(at)]
+      }
+      if (JSON.stringify(list) !== JSON.stringify(shared)) next = list
+    } else if (majorSource && hasMarks(majorSource)) {
+      // no usable saved list but marks on the major course: start from the template
+      next = courseTemplate('sem3').map(c => (c.courseCode === SEM3_MAJOR_COURSE.courseCode ? majorRow : blankCourse(c)))
+    }
+
+    const sets = [], removes = []
+    if (next) sets.push([sKey, JSON.stringify(next)])
+    if (localStorage.getItem(LS_MINOR) === null) {
+      const legacy = normalizeLegacyMinors(readJson(LEGACY_MINORS_KEY))
+      if (legacy) sets.push([LS_MINOR, JSON.stringify(legacy.length > 0)])
+    }
+    for (const id of LEGACY_MAJOR_IDS) removes.push(majorKey('sem3', id))
+    removes.push(LEGACY_MAJOR_KEY, LEGACY_MINORS_KEY)
+
+    // backups first, then writes, then removals, then the flag
+    for (const key of [...sets.map(([k]) => k), ...removes]) {
+      const cur = localStorage.getItem(key)
+      const bk = `${key}${BACKUP_SUFFIX_V3}`
+      if (cur !== null && localStorage.getItem(bk) === null) localStorage.setItem(bk, cur)
+    }
+    for (const [key, value] of sets) localStorage.setItem(key, value)
+    for (const key of removes) localStorage.removeItem(key)
+    localStorage.setItem(LS_GENERIC_SLOTS_MIGRATED, new Date().toISOString())
+  } catch {}
+}
+
+// Repair after a tab still running the old version saved over migrated data. Runs on
+// every load once the migration flag is set. It acts only on evidence of an old save
+// (a reappeared per-major key, old minors setting or old saved major; every old save
+// writes a per-major key) and does nothing otherwise:
+// - LW2055 / LW2032 rows in the Sem 3 list become MINOR1 / MINOR2 again. When a MINOR
+//   row already exists the two are merged field by field into it (the generic row wins
+//   on conflicts, its blanks are filled from the old row) and the old row is dropped,
+//   so the course counts once. Without evidence, hand-typed LW rows stay as they are;
+//   An old minor row whose id is in the list's _premigration_v3 backup also counts as
+//   evidence (an old save whose per-major key write failed);
+// - a reappeared per-major key fills the MAJOR row (same choice of course as the
+//   migration), marks filled when it is blank; then the key is removed. A missing MAJOR
+//   is inserted when the chosen course has marks, or blank when the old tab replays its
+//   pre-deploy major row (id equal to the one in <majorKey>_premigration_v3) or saved an
+//   old-format list (old minor rows present). A MAJOR the user deleted is not brought back
+//   blank: an old build that only opens migrated data writes a fresh row with a new id and
+//   no old minor rows;
+// - a reappeared old minors setting turns the minor on when it says on. It turns it off
+//   only when the list still holds old minor rows, i.e. the old tab showed them and the
+//   minor was switched off there; an old build that merely opened on migrated data
+//   (it cannot see MINOR rows and writes "off") leaves the switch alone. A reappeared
+//   saved major is only used to pick the course. Both are removed;
+// - every key changed or removed is first copied to <key>_stale_<time> (a new key each
+//   time, never overwritten). A failed write aborts before anything is removed, and
+//   the next load tries again. Hand-typed rows with old major codes stay untouched.
+export function repairStaleSem3() {
+  try {
+    if (localStorage.getItem(LS_GENERIC_SLOTS_MIGRATED) === null) return
+    const sKey = sharedKey('sem3')
+    const presentMajorIds = LEGACY_MAJOR_IDS.filter(id => localStorage.getItem(majorKey('sem3', id)) !== null)
+    const rawShared = readJson(sKey)
+    const shared = Array.isArray(rawShared) && rawShared.some(isCourse) ? rawShared : null
+    const hasOldMinor = !!shared?.some(c => isCourse(c) && LEGACY_SEM3_MINOR_CODES[c.courseCode])
+    const oldMinors = localStorage.getItem(LEGACY_MINORS_KEY) !== null
+    const oldMajor = localStorage.getItem(LEGACY_MAJOR_KEY) !== null
+    // an old minor row whose id is in the list's backup was saved by an old tab, even when its
+    // per-major key write failed; a hand-typed row has a new id
+    const sharedBk = hasOldMinor ? backupIds(sKey) : null
+    const replayedMinor = hasOldMinor && shared.some(c => isCourse(c) && LEGACY_SEM3_MINOR_CODES[c.courseCode] && sharedBk.has(c.id))
+    if (!presentMajorIds.length && !oldMinors && !oldMajor && !replayedMinor) return // no old save: nothing to repair
+
+    let list = shared ? shared.slice() : null
+    if (list && hasOldMinor) {
+      for (const [from, to] of Object.entries(LEGACY_SEM3_MINOR_CODES)) {
+        const name = MINOR_COURSES.sem3.find(m => m.courseCode === to).courseName
+        for (let i = 0; i < list.length; i++) {
+          const c = list[i]
+          if (!isCourse(c) || c.courseCode !== from) continue
+          const g = list.findIndex(x => isCourse(x) && normCode(x.courseCode) === to)
+          const renamed = { ...c, courseCode: to, courseName: name }
+          if (g < 0) { list[i] = renamed; continue }
+          // merge into the existing MINOR row (a blank one simply takes the old row), drop the old row
+          list[g] = hasMarks(list[g]) ? mergeCourse(list[g], renamed) : { ...renamed, id: list[g].id ?? renamed.id }
+          list.splice(i, 1); i--
+        }
+      }
+    }
+
+    // the old tab replays its pre-deploy major row (same id as in the backup) or saved an
+    // old-format list (old minor rows; its view never had MAJOR, e.g. after its reset):
+    // MAJOR was not deleted by the user, so a missing one comes back even when blank
+    const replayedMajor = presentMajorIds.some(id => {
+      const ids = backupIds(majorKey('sem3', id)), raw = readJson(majorKey('sem3', id))
+      return Array.isArray(raw) && raw.some(c => isCourse(c) && c.courseCode === LEGACY_SEM3_MAJOR_CODES[id] && ids.has(c.id))
+    })
+    if (presentMajorIds.length || replayedMinor) {
+      const src = presentMajorIds.length ? pickLegacyMajorSource(resolveLegacyMajor()) : null
+      if (list) {
+        const m = list.findIndex(c => isCourse(c) && normCode(c.courseCode) === SEM3_MAJOR_COURSE.courseCode)
+        if (m < 0) {
+          if ((src && hasMarks(src)) || replayedMajor || hasOldMinor) {
+            const at = majorInsertAt(list)
+            list = [...list.slice(0, at), toMajorRow(src), ...list.slice(at)]
+          }
+        } else if (!hasMarks(list[m]) && src && hasMarks(src)) {
+          const filled = { ...list[m] }
+          for (const k of ['cie1Marks', 'cie2Marks', 'cie3Marks', 'seeMarks', 'directGrade', 'totalMarks', 'grade', 'gradePoint', 'creditGradeProduct']) {
+            if (src[k] !== undefined) filled[k] = src[k]
+          }
+          list[m] = enrichCourse(filled)
+        }
+      } else if (src && hasMarks(src)) {
+        list = courseTemplate('sem3').map(c => (c.courseCode === SEM3_MAJOR_COURSE.courseCode ? toMajorRow(src) : blankCourse(c)))
+      }
+    }
+
+    const sets = [], removes = []
+    if (list && JSON.stringify(list) !== JSON.stringify(rawShared)) sets.push([sKey, JSON.stringify(list)])
+    if (oldMinors) {
+      const legacy = normalizeLegacyMinors(readJson(LEGACY_MINORS_KEY))
+      if (legacy?.length) sets.push([LS_MINOR, 'true'])
+      else if (legacy && hasOldMinor) sets.push([LS_MINOR, 'false'])
+      removes.push(LEGACY_MINORS_KEY)
+    }
+    for (const id of presentMajorIds) removes.push(majorKey('sem3', id))
+    if (oldMajor) removes.push(LEGACY_MAJOR_KEY)
+
+    const stamp = new Date().toISOString()
+    for (const key of [...sets.map(([k]) => k), ...removes]) {
+      const cur = localStorage.getItem(key)
+      if (cur === null) continue
+      let bk = `${key}_stale_${stamp}`
+      for (let n = 2; localStorage.getItem(bk) !== null; n++) bk = `${key}_stale_${stamp}_${n}`
+      localStorage.setItem(bk, cur)
+    }
+    for (const [key, value] of sets) localStorage.setItem(key, value)
+    for (const key of removes) localStorage.removeItem(key)
+  } catch {}
+}
+
+// Old exports (CSV) may carry retired Sem 3 codes: map them to the generic rows on import.
+export function mapRetiredSem3Codes(courses) {
+  return courses.map(c => {
+    const minor = LEGACY_SEM3_MINOR_CODES[normCode(c?.courseCode)]
+    if (minor) return { ...c, courseCode: minor, courseName: MINOR_COURSES.sem3.find(m => m.courseCode === minor).courseName, credits: c.credits ?? 3 }
+    if (legacyMajorForCode(normCode(c?.courseCode))) return { ...c, courseCode: SEM3_MAJOR_COURSE.courseCode, courseName: SEM3_MAJOR_COURSE.courseName, credits: c.credits ?? SEM3_MAJOR_COURSE.credits }
+    return c
+  })
 }
 
 export function loadSelection() {
